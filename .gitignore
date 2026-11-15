@@ -1,0 +1,11 @@
+*.o
+*.out
+
+switch
+host
+test_main
+test_tsan
+
+*.zip
+
+*:Zone.Identifier

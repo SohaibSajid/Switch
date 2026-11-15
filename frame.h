@@ -1,6 +1,7 @@
 #ifndef FRAME_H
 #define FRAME_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define FRAME_HDR 17
@@ -24,5 +25,7 @@ int frame_unpack(const uint8_t *buf, struct frame_hdr *h);
 int mac_parse(const char *s, uint8_t *mac);
 void mac_format(const uint8_t *mac, char *out);
 int mac_is_broadcast(const uint8_t *mac);
+
+void frame_text(const uint8_t *payload, uint16_t len, char *out, size_t size);
 
 #endif

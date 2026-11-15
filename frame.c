@@ -73,3 +73,14 @@ int mac_is_broadcast(const uint8_t *mac)
             return 0;
     return 1;
 }
+
+void frame_text(const uint8_t *payload, uint16_t len, char *out, size_t size)
+{
+    size_t n = 0;
+    while (n < len && n + 1 < size) {
+        uint8_t c = payload[n];
+        out[n] = (c >= 32 && c < 127) ? (char)c : '.';
+        n++;
+    }
+    out[n] = '\0';
+}
