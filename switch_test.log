@@ -1,0 +1,69 @@
+switch listening on TCP 9101 with 4 ports
+port 1: 02:00:00:00:00:0A -> 02:00:00:00:00:0B vlan 1 pri 1 len 7 "hello B" => flood (unknown)
+port 1: host connected from 127.0.0.1:48206
+port 2: 02:00:00:00:00:0B -> 02:00:00:00:00:0A vlan 1 pri 1 len 7 "hello A" => port 1
+port 2: host connected from 127.0.0.1:48216
+port 2: host disconnected
+port 3: host connected from 127.0.0.1:48218
+port 3: 02:00:00:00:00:0C -> 02:00:00:00:00:0A vlan 1 pri 1 len 8 "split up" => port 1
+port 3: host disconnected
+port 2: host connected from 127.0.0.1:48220
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 0" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 1" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 2" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 3" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 4" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 5" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 6" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 7" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 8" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 9" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 10" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 11" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 12" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 13" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 14" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 15" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 16" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 17" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 18" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 19" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 20" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 21" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 22" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 23" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 24" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 25" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 26" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 27" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 28" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 29" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 30" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 31" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 32" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 33" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 34" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 35" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 36" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 37" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 38" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 39" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 40" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 41" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 42" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 43" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 44" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 45" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 46" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 47" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 48" => flood (broadcast)
+port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 49" => flood (broadcast)
+port 2: host disconnected
+port 2: closing (Protocol error)
+port 2: host connected from 127.0.0.1:48232
+port 1: host disconnected
+port 1: 02:00:00:00:00:0A -> FF:FF:FF:FF:FF:FF vlan 20 pri 0 len 5 "moved" => flood (broadcast)
+port 1: host connected from 127.0.0.1:48246
+port 1: host disconnected
+port 1: closing (Protocol error)
+port 1: host connected from 127.0.0.1:48256
