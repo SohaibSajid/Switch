@@ -54,8 +54,8 @@ static void unlink_entry(struct mac_table *t, struct mac_entry **link)
 
 static int port_has_room(struct mac_table *t, int port)
 {
-    return t->max_per_port == 0 ||
-           atomic_load(&t->per_port[port]) < t->max_per_port;
+    int limit = atomic_load(&t->max_per_port);
+    return limit == 0 || atomic_load(&t->per_port[port]) < limit;
 }
 
 static int evict_lru(struct mac_table *t)
@@ -102,13 +102,14 @@ static int evict_lru(struct mac_table *t)
 
 static int reserve(struct mac_table *t)
 {
-    if (t->max_entries == 0) {
+    int limit = atomic_load(&t->max_entries);
+    if (limit == 0) {
         atomic_fetch_add(&t->count, 1);
         return 0;
     }
     for (int tries = 0; tries < EVICT_TRIES;) {
         int c = atomic_load(&t->count);
-        if (c < t->max_entries) {
+        if (c < limit) {
             if (atomic_compare_exchange_weak(&t->count, &c, c + 1))
                 return 0;
             continue;
@@ -121,8 +122,8 @@ static int reserve(struct mac_table *t)
 
 int mac_table_init(struct mac_table *t, int max_entries, int max_per_port)
 {
-    t->max_entries = max_entries;
-    t->max_per_port = max_per_port;
+    atomic_init(&t->max_entries, max_entries);
+    atomic_init(&t->max_per_port, max_per_port);
     atomic_init(&t->count, 0);
     atomic_init(&t->clock, 0);
     for (int i = 0; i <= MAC_MAX_PORT; i++)
@@ -288,4 +289,29 @@ int mac_table_age(struct mac_table *t, int max_age)
 size_t mac_table_count(struct mac_table *t)
 {
     return (size_t)atomic_load(&t->count);
+}
+
+void mac_table_set_limits(struct mac_table *t, int max_entries, int max_per_port)
+{
+    atomic_store(&t->max_entries, max_entries);
+    atomic_store(&t->max_per_port, max_per_port);
+}
+
+int mac_table_dump(struct mac_table *t, FILE *f)
+{
+    time_t ts = now();
+    int n = 0;
+
+    fprintf(f, "%-17s  %4s  %s\n", "MAC", "PORT", "IDLE");
+    for (int i = 0; i < MAC_BUCKETS; i++) {
+        lock(&t->bucket[i].lock);
+        for (struct mac_entry *e = t->bucket[i].head; e; e = e->next) {
+            char s[MAC_STR_LEN];
+            mac_format(e->mac, s);
+            fprintf(f, "%-17s  %4d  %lds\n", s, e->port, (long)(ts - e->seen));
+            n++;
+        }
+        unlock(&t->bucket[i].lock);
+    }
+    return n;
 }

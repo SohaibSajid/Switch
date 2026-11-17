@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <time.h>
 
@@ -29,8 +30,8 @@ struct mac_bucket {
 
 struct mac_table {
     struct mac_bucket bucket[MAC_BUCKETS];
-    int max_entries;
-    int max_per_port;
+    atomic_int max_entries;
+    atomic_int max_per_port;
     atomic_int count;
     atomic_ulong clock;
     atomic_int per_port[MAC_MAX_PORT + 1];
@@ -43,5 +44,7 @@ int mac_table_insert(struct mac_table *t, const uint8_t *mac, int port);
 int mac_table_flush_port(struct mac_table *t, int port);
 int mac_table_age(struct mac_table *t, int max_age);
 size_t mac_table_count(struct mac_table *t);
+void mac_table_set_limits(struct mac_table *t, int max_entries, int max_per_port);
+int mac_table_dump(struct mac_table *t, FILE *f);
 
 #endif

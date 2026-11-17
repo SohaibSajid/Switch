@@ -1,15 +1,15 @@
-switch listening on TCP 9100 with 4 ports
-port 1: host connected from 127.0.0.1:57506
+switch listening on TCP 9100 with 4 ports (age 30s, max 1024 MACs, 16 per port, wait 5s)
+port 1: host connected from 127.0.0.1:39416
 port 1: 02:00:00:00:00:0A -> 02:00:00:00:00:0B vlan 1 pri 1 len 7 "hello B" => flood (unknown, 0 ports, 0 dropped)
-port 2: host connected from 127.0.0.1:57510
+port 2: host connected from 127.0.0.1:39432
 port 2: 02:00:00:00:00:0B -> 02:00:00:00:00:0A vlan 1 pri 1 len 7 "hello A" => port 1
 port 2: host disconnected
 port 2: closed, 0 frames dropped, 1 MACs flushed
-port 2: host connected from 127.0.0.1:57520
+port 2: host connected from 127.0.0.1:39440
 port 2: 02:00:00:00:00:0C -> 02:00:00:00:00:0A vlan 1 pri 1 len 8 "split up" => port 1
 port 2: host disconnected
 port 2: closed, 0 frames dropped, 1 MACs flushed
-port 2: host connected from 127.0.0.1:37132
+port 2: host connected from 127.0.0.1:39442
 port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 0" => flood (broadcast, 1 ports, 0 dropped)
 port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 1" => flood (broadcast, 1 ports, 0 dropped)
 port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 7 "burst 2" => flood (broadcast, 1 ports, 0 dropped)
@@ -62,15 +62,15 @@ port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 48" => 
 port 2: 02:00:00:00:00:0D -> FF:FF:FF:FF:FF:FF vlan 1 pri 1 len 8 "burst 49" => flood (broadcast, 1 ports, 0 dropped)
 port 2: host disconnected
 port 2: closed, 0 frames dropped, 1 MACs flushed
-port 2: host connected from 127.0.0.1:37148
+port 2: host connected from 127.0.0.1:39448
 port 2: closing (Protocol error)
 port 2: closed, 0 frames dropped, 0 MACs flushed
 port 1: host disconnected
 port 1: closed, 0 frames dropped, 1 MACs flushed
-port 1: host connected from 127.0.0.1:37150
+port 1: host connected from 127.0.0.1:39456
 port 1: 02:00:00:00:00:0A -> FF:FF:FF:FF:FF:FF vlan 20 pri 0 len 5 "moved" => flood (broadcast, 0 ports, 0 dropped)
 port 1: host disconnected
 port 1: closed, 0 frames dropped, 1 MACs flushed
-port 1: host connected from 127.0.0.1:37166
+port 1: host connected from 127.0.0.1:39464
 port 1: closing (Protocol error)
 port 1: closed, 0 frames dropped, 0 MACs flushed

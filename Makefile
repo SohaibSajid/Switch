@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -std=c11 -Wall -Wextra -Werror -g -O0 -pthread
 LDFLAGS = -pthread
 
-COMMON = frame.o mac_table.o net.o pkt.o queue.o
+COMMON = frame.o mac_table.o net.o pkt.o queue.o config.o
 PROGS = switch host test_main
 
 all: $(PROGS)
@@ -16,7 +16,7 @@ host: host.o frame.o net.o
 test_main: test_main.o frame.o mac_table.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-switch_tsan: switch.c frame.c mac_table.c net.c pkt.c queue.c
+switch_tsan: switch.c frame.c mac_table.c net.c pkt.c queue.c config.c
 	$(CC) $(CFLAGS) -fsanitize=thread -o $@ $^
 
 test_tsan: test_main.c frame.c mac_table.c
@@ -27,7 +27,8 @@ mac_table.o: mac_table.c mac_table.h frame.h sync.h
 net.o: net.c net.h frame.h
 pkt.o: pkt.c pkt.h frame.h sync.h
 queue.o: queue.c queue.h pkt.h sync.h
-switch.o: switch.c frame.h mac_table.h net.h pkt.h queue.h sync.h
+switch.o: switch.c config.h frame.h mac_table.h net.h pkt.h queue.h sync.h
+config.o: config.c config.h
 host.o: host.c frame.h net.h
 test_main.o: test_main.c frame.h mac_table.h
 

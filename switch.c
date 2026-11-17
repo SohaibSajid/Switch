@@ -2,10 +2,13 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <poll.h>
 #include <semaphore.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "config.h"
 #include "frame.h"
 #include "mac_table.h"
 #include "net.h"
@@ -40,14 +44,26 @@ static pthread_mutex_t ports_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct mac_table table;
 static sem_t port_sem;
 
-static int max_age = 30;
-static int max_entries = 1024;
-static int max_per_port = 16;
-static int wait_secs = 5;
+static struct config cfg = { 30, 1024, 16, 5 };
+static const char *cfg_path;
+static const char *dump_path = "mac_table.txt";
+static atomic_int max_age;
+static atomic_int max_per_port;
+static atomic_int wait_secs;
 
 static pthread_mutex_t age_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t age_cond;
-static int stopping;
+static atomic_int stopping;
+static int stop_pipe[2] = { -1, -1 };
+static sigset_t sigs;
+
+static void apply_config(void)
+{
+    atomic_store(&max_age, cfg.age);
+    atomic_store(&max_per_port, cfg.per_port);
+    atomic_store(&wait_secs, cfg.wait);
+    mac_table_set_limits(&table, cfg.max_macs, cfg.per_port);
+}
 
 static void post_port(void)
 {
@@ -145,8 +161,6 @@ static void close_port(struct port *p)
     int err = pthread_join(p->tx, NULL);
     if (err)
         fprintf(stderr, "pthread_join: %s\n", strerror(err));
-    if (close(p->fd) == -1)
-        perror("close");
 
     printf("port %d: closed, %lu frames dropped, %d MACs flushed\n",
            p->id, dropped, flushed);
@@ -168,7 +182,7 @@ static void *receiver(void *arg)
         int learned = mac_table_insert(&table, h.src, p->id);
         if (learned == MAC_LIMIT) {
             printf("port %d: port security, more than %d MACs, shutting port down\n",
-                   p->id, max_per_port);
+                   p->id, atomic_load(&max_per_port));
             break;
         }
         if (learned == MAC_ERR)
@@ -192,6 +206,9 @@ static void *receiver(void *arg)
     close_port(p);
 
     lock(&ports_lock);
+    if (close(p->fd) == -1)
+        perror("close");
+    p->fd = -1;
     p->state = PORT_DONE;
     unlock(&ports_lock);
     post_port();
@@ -219,11 +236,78 @@ static void *ager(void *arg)
             break;
 
         unlock(&age_lock);
-        mac_table_age(&table, max_age);
+        mac_table_age(&table, atomic_load(&max_age));
         lock(&age_lock);
     }
     unlock(&age_lock);
     return NULL;
+}
+
+static void begin_shutdown(void)
+{
+    lock(&age_lock);
+    atomic_store(&stopping, 1);
+    cond_broadcast(&age_cond);
+    unlock(&age_lock);
+
+    if (write(stop_pipe[1], "x", 1) == -1)
+        perror("write stop pipe");
+    post_port();
+}
+
+static void reload_config(void)
+{
+    if (!cfg_path) {
+        printf("SIGHUP: no config file given (-c), nothing to reload\n");
+        return;
+    }
+    struct config next = cfg;
+    if (config_load(cfg_path, &next) == -1) {
+        printf("SIGHUP: config error in %s, keeping old settings\n", cfg_path);
+        return;
+    }
+    cfg = next;
+    apply_config();
+    printf("SIGHUP: config reloaded from %s (age %d, max_macs %d, "
+           "macs_per_port %d, wait %d)\n",
+           cfg_path, cfg.age, cfg.max_macs, cfg.per_port, cfg.wait);
+}
+
+static void dump_macs(void)
+{
+    FILE *f = fopen(dump_path, "w");
+    if (!f) {
+        perror(dump_path);
+        return;
+    }
+    int n = mac_table_dump(&table, f);
+    if (fclose(f) == EOF) {
+        perror(dump_path);
+        return;
+    }
+    printf("SIGUSR1: %d MAC entries written to %s\n", n, dump_path);
+}
+
+static void *signal_loop(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        int sig;
+        int err = sigwait(&sigs, &sig);
+        if (err)
+            die_err("sigwait", err);
+
+        if (sig == SIGINT || sig == SIGTERM) {
+            printf("%s: shutting down\n", sig == SIGINT ? "SIGINT" : "SIGTERM");
+            begin_shutdown();
+            return NULL;
+        }
+        if (sig == SIGHUP)
+            reload_config();
+        else if (sig == SIGUSR1)
+            dump_macs();
+    }
 }
 
 static void reap(struct port *p)
@@ -267,7 +351,7 @@ static int wait_port(void)
         perror("clock_gettime");
         return -1;
     }
-    until.tv_sec += wait_secs;
+    until.tv_sec += atomic_load(&wait_secs);
 
     while (sem_timedwait(&port_sem, &until) == -1) {
         if (errno == EINTR)
@@ -328,6 +412,12 @@ static int open_listener(int tcp_port)
         close(s);
         return -1;
     }
+    int flags = fcntl(s, F_GETFL);
+    if (flags == -1 || fcntl(s, F_SETFL, flags | O_NONBLOCK) == -1) {
+        perror("fcntl");
+        close(s);
+        return -1;
+    }
     return s;
 }
 
@@ -352,21 +442,44 @@ static int parse_int(const char *s, int min, int max, int *out)
 
 static void accept_loop(int listener)
 {
-    for (;;) {
+    struct pollfd pfd[2];
+    pfd[0].fd = listener;
+    pfd[0].events = POLLIN;
+    pfd[1].fd = stop_pipe[0];
+    pfd[1].events = POLLIN;
+
+    while (!atomic_load(&stopping)) {
+        if (poll(pfd, 2, -1) == -1) {
+            if (errno == EINTR)
+                continue;
+            perror("poll");
+            return;
+        }
+        if (pfd[1].revents)
+            return;
+        if (!(pfd[0].revents & POLLIN))
+            continue;
+
         struct sockaddr_in addr;
         socklen_t alen = sizeof addr;
 
         int fd = accept(listener, (struct sockaddr *)&addr, &alen);
         if (fd == -1) {
-            if (errno == EINTR || errno == ECONNABORTED)
-                continue;
-            perror("accept");
+            if (errno != EINTR && errno != ECONNABORTED &&
+                errno != EAGAIN && errno != EWOULDBLOCK)
+                perror("accept");
             continue;
         }
 
         if (wait_port() == -1) {
             reject(fd);
             continue;
+        }
+        if (atomic_load(&stopping)) {
+            post_port();
+            if (close(fd) == -1)
+                perror("close");
+            return;
         }
 
         struct port *p = grab_port();
@@ -393,6 +506,8 @@ static void accept_loop(int listener)
         if (err) {
             fprintf(stderr, "pthread_create: %s\n", strerror(err));
             close_port(p);
+            if (close(fd) == -1)
+                perror("close");
             release_port(p);
             continue;
         }
@@ -405,21 +520,68 @@ static void accept_loop(int listener)
     }
 }
 
+static void stop_ports(void)
+{
+    lock(&ports_lock);
+    for (int i = 0; i < nports; i++)
+        if (ports[i].state == PORT_ACTIVE &&
+            shutdown(ports[i].fd, SHUT_RDWR) == -1 && errno != ENOTCONN)
+            perror("shutdown");
+    unlock(&ports_lock);
+
+    for (int i = 0; i < nports; i++) {
+        lock(&ports_lock);
+        int busy = ports[i].state != PORT_FREE;
+        unlock(&ports_lock);
+        if (!busy)
+            continue;
+
+        int err = pthread_join(ports[i].rx, NULL);
+        if (err)
+            fprintf(stderr, "pthread_join: %s\n", strerror(err));
+        lock(&ports_lock);
+        ports[i].state = PORT_FREE;
+        unlock(&ports_lock);
+    }
+}
+
+static void join_thread(pthread_t t, const char *name)
+{
+    int err = pthread_join(t, NULL);
+    if (err)
+        fprintf(stderr, "pthread_join %s: %s\n", name, strerror(err));
+}
+
+static void usage(const char *prog)
+{
+    fprintf(stderr,
+            "usage: %s [-c config] [-d dump_file] [-a age_secs] [-k max_macs]\n"
+            "          [-m macs_per_port] [-w wait_secs] <tcp_port> <num_ports 1-%d>\n"
+            "defaults: -a 30 -k 1024 -m 16 -w 5 -d mac_table.txt "
+            "(0 for -k or -m means no limit)\n",
+            prog, MAX_PORTS);
+}
+
 int main(int argc, char **argv)
 {
     int tcp_port;
     int opt;
     int bad = 0;
+    struct config cli = { -1, -1, -1, -1 };
 
-    while ((opt = getopt(argc, argv, "a:k:m:w:")) != -1) {
-        if (opt == 'a')
-            bad |= parse_int(optarg, 1, 86400, &max_age);
+    while ((opt = getopt(argc, argv, "c:d:a:k:m:w:")) != -1) {
+        if (opt == 'c')
+            cfg_path = optarg;
+        else if (opt == 'd')
+            dump_path = optarg;
+        else if (opt == 'a')
+            bad |= parse_int(optarg, 1, 86400, &cli.age);
         else if (opt == 'k')
-            bad |= parse_int(optarg, 0, 1000000, &max_entries);
+            bad |= parse_int(optarg, 0, 1000000, &cli.max_macs);
         else if (opt == 'm')
-            bad |= parse_int(optarg, 0, 1000000, &max_per_port);
+            bad |= parse_int(optarg, 0, 1000000, &cli.per_port);
         else if (opt == 'w')
-            bad |= parse_int(optarg, 0, 3600, &wait_secs);
+            bad |= parse_int(optarg, 0, 3600, &cli.wait);
         else
             bad = 1;
     }
@@ -427,13 +589,20 @@ int main(int argc, char **argv)
     if (bad || argc - optind != 2 ||
         parse_int(argv[optind], 1, 65535, &tcp_port) == -1 ||
         parse_int(argv[optind + 1], 1, MAX_PORTS, &nports) == -1) {
-        fprintf(stderr,
-                "usage: %s [-a age_secs] [-k max_macs] [-m macs_per_port] [-w wait_secs]\n"
-                "          <tcp_port> <num_ports 1-%d>\n"
-                "defaults: -a 30 -k 1024 -m 16 -w 5 (0 for -k or -m means no limit)\n",
-                argv[0], MAX_PORTS);
+        usage(argv[0]);
         return 1;
     }
+
+    if (cfg_path && config_load(cfg_path, &cfg) == -1)
+        return 1;
+    if (cli.age >= 0)
+        cfg.age = cli.age;
+    if (cli.max_macs >= 0)
+        cfg.max_macs = cli.max_macs;
+    if (cli.per_port >= 0)
+        cfg.per_port = cli.per_port;
+    if (cli.wait >= 0)
+        cfg.wait = cli.wait;
 
     if (setvbuf(stdout, NULL, _IOLBF, 0) != 0)
         perror("setvbuf");
@@ -446,6 +615,27 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (sigemptyset(&sigs) == -1 || sigaddset(&sigs, SIGINT) == -1 ||
+        sigaddset(&sigs, SIGTERM) == -1 || sigaddset(&sigs, SIGHUP) == -1 ||
+        sigaddset(&sigs, SIGUSR1) == -1) {
+        perror("sigset");
+        return 1;
+    }
+    int err = pthread_sigmask(SIG_BLOCK, &sigs, NULL);
+    if (err) {
+        fprintf(stderr, "pthread_sigmask: %s\n", strerror(err));
+        return 1;
+    }
+
+    int listener = open_listener(tcp_port);
+    if (listener == -1)
+        return 1;
+    if (pipe(stop_pipe) == -1) {
+        perror("pipe");
+        close(listener);
+        return 1;
+    }
+
     ports = calloc((size_t)nports, sizeof *ports);
     if (!ports) {
         perror("calloc");
@@ -455,7 +645,7 @@ int main(int argc, char **argv)
         ports[i].id = i + 1;
         ports[i].fd = -1;
         ports[i].state = PORT_FREE;
-        int err = queue_init(&ports[i].q, QUEUE_CAP);
+        err = queue_init(&ports[i].q, QUEUE_CAP);
         if (err) {
             fprintf(stderr, "queue_init: %s\n", strerror(err));
             free_ports(i);
@@ -463,38 +653,58 @@ int main(int argc, char **argv)
         }
     }
 
-    int err = mac_table_init(&table, max_entries, max_per_port);
+    err = mac_table_init(&table, cfg.max_macs, cfg.per_port);
     if (err) {
         fprintf(stderr, "mac_table_init: %s\n", strerror(err));
         free_ports(nports);
         return 1;
     }
+    apply_config();
 
     if (sem_init(&port_sem, 0, (unsigned int)nports) == -1) {
         perror("sem_init");
-        mac_table_destroy(&table);
-        free_ports(nports);
         return 1;
     }
 
     pthread_condattr_t attr;
     pthread_t age_thread;
+    pthread_t sig_thread;
     if ((err = pthread_condattr_init(&attr)) ||
         (err = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC)) ||
         (err = pthread_cond_init(&age_cond, &attr)) ||
         (err = pthread_condattr_destroy(&attr)) ||
-        (err = pthread_create(&age_thread, NULL, ager, NULL))) {
-        fprintf(stderr, "aging thread setup: %s\n", strerror(err));
+        (err = pthread_create(&age_thread, NULL, ager, NULL)) ||
+        (err = pthread_create(&sig_thread, NULL, signal_loop, NULL))) {
+        fprintf(stderr, "thread setup: %s\n", strerror(err));
         return 1;
     }
 
-    int listener = open_listener(tcp_port);
-    if (listener == -1)
-        return 1;
-
     printf("switch listening on TCP %d with %d ports "
            "(age %ds, max %d MACs, %d per port, wait %ds)\n",
-           tcp_port, nports, max_age, max_entries, max_per_port, wait_secs);
+           tcp_port, nports, cfg.age, cfg.max_macs, cfg.per_port, cfg.wait);
+
     accept_loop(listener);
+
+    if (!atomic_load(&stopping)) {
+        err = pthread_kill(sig_thread, SIGTERM);
+        if (err)
+            fprintf(stderr, "pthread_kill: %s\n", strerror(err));
+    }
+
+    if (close(listener) == -1)
+        perror("close");
+    stop_ports();
+    join_thread(sig_thread, "signal");
+    join_thread(age_thread, "aging");
+
+    mac_table_destroy(&table);
+    free_ports(nports);
+    if (sem_destroy(&port_sem) == -1)
+        perror("sem_destroy");
+    pthread_cond_destroy(&age_cond);
+    close(stop_pipe[0]);
+    close(stop_pipe[1]);
+
+    printf("switch stopped cleanly\n");
     return 0;
 }
