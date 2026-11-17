@@ -132,6 +132,7 @@ static void help(void)
            "  half <mac|bcast>          send half a frame, then quit\n"
            "  vlan <1-4094>             set vlan for next frames\n"
            "  pri <0-2>                 set priority for next frames\n"
+           "  src <mac>                 change own MAC (spoofing tests)\n"
            "  sleep <ms>                wait (for scripts)\n"
            "  quit\n");
 }
@@ -173,6 +174,11 @@ static int run_line(char *line)
             printf("pri must be 0-2\n");
         else
             pri = (uint8_t)v;
+        return 0;
+    }
+    if (strcmp(cmd, "src") == 0) {
+        if (mac_parse(arg, self) == -1 || mac_is_broadcast(self))
+            printf("bad MAC: %s\n", arg);
         return 0;
     }
     if (strcmp(cmd, "sleep") == 0) {

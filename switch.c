@@ -4,11 +4,13 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "frame.h"
@@ -36,6 +38,22 @@ static struct port *ports;
 static int nports;
 static pthread_mutex_t ports_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct mac_table table;
+static sem_t port_sem;
+
+static int max_age = 30;
+static int max_entries = 1024;
+static int max_per_port = 16;
+static int wait_secs = 5;
+
+static pthread_mutex_t age_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t age_cond;
+static int stopping;
+
+static void post_port(void)
+{
+    if (sem_post(&port_sem) == -1)
+        perror("sem_post");
+}
 
 static void log_frame(int in, const struct frame_hdr *h,
                       const uint8_t *payload, const char *where)
@@ -147,7 +165,13 @@ static void *receiver(void *arg)
             printf("port %d: broadcast source MAC, frame dropped\n", p->id);
             continue;
         }
-        if (mac_table_insert(&table, h.src, p->id) == MAC_ERR)
+        int learned = mac_table_insert(&table, h.src, p->id);
+        if (learned == MAC_LIMIT) {
+            printf("port %d: port security, more than %d MACs, shutting port down\n",
+                   p->id, max_per_port);
+            break;
+        }
+        if (learned == MAC_ERR)
             fprintf(stderr, "port %d: MAC table insert failed\n", p->id);
 
         struct pkt *k = pkt_new(&h, payload);
@@ -162,7 +186,7 @@ static void *receiver(void *arg)
 
     if (r == 0)
         printf("port %d: host disconnected\n", p->id);
-    else
+    else if (r == -1)
         printf("port %d: closing (%s)\n", p->id, strerror(errno));
 
     close_port(p);
@@ -170,6 +194,35 @@ static void *receiver(void *arg)
     lock(&ports_lock);
     p->state = PORT_DONE;
     unlock(&ports_lock);
+    post_port();
+    return NULL;
+}
+
+static void *ager(void *arg)
+{
+    (void)arg;
+
+    lock(&age_lock);
+    while (!stopping) {
+        struct timespec until;
+        if (clock_gettime(CLOCK_MONOTONIC, &until) == -1)
+            die_err("clock_gettime", errno);
+        until.tv_sec += 1;
+
+        int err = 0;
+        while (!stopping && err != ETIMEDOUT) {
+            err = pthread_cond_timedwait(&age_cond, &age_lock, &until);
+            if (err && err != ETIMEDOUT)
+                die_err("pthread_cond_timedwait", err);
+        }
+        if (stopping)
+            break;
+
+        unlock(&age_lock);
+        mac_table_age(&table, max_age);
+        lock(&age_lock);
+    }
+    unlock(&age_lock);
     return NULL;
 }
 
@@ -204,6 +257,44 @@ static void release_port(struct port *p)
     lock(&ports_lock);
     p->state = PORT_FREE;
     unlock(&ports_lock);
+    post_port();
+}
+
+static int wait_port(void)
+{
+    struct timespec until;
+    if (clock_gettime(CLOCK_REALTIME, &until) == -1) {
+        perror("clock_gettime");
+        return -1;
+    }
+    until.tv_sec += wait_secs;
+
+    while (sem_timedwait(&port_sem, &until) == -1) {
+        if (errno == EINTR)
+            continue;
+        if (errno != ETIMEDOUT)
+            perror("sem_timedwait");
+        return -1;
+    }
+    return 0;
+}
+
+static void reject(int fd)
+{
+    const char *msg = "switch full";
+    struct frame_hdr h;
+
+    memset(&h, 0, sizeof h);
+    memset(h.dst, 0xFF, MAC_LEN);
+    h.len = (uint16_t)strlen(msg);
+    h.vlan = 1;
+    h.pri = PRI_HIGH;
+
+    printf("switch full, rejecting connection\n");
+    if (frame_write(fd, &h, (const uint8_t *)msg) == -1)
+        perror("switch full reply");
+    if (close(fd) == -1)
+        perror("close");
 }
 
 static int open_listener(int tcp_port)
@@ -273,11 +364,15 @@ static void accept_loop(int listener)
             continue;
         }
 
+        if (wait_port() == -1) {
+            reject(fd);
+            continue;
+        }
+
         struct port *p = grab_port();
         if (!p) {
-            printf("switch full, rejecting connection\n");
-            if (close(fd) == -1)
-                perror("close");
+            post_port();
+            reject(fd);
             continue;
         }
 
@@ -313,10 +408,30 @@ static void accept_loop(int listener)
 int main(int argc, char **argv)
 {
     int tcp_port;
+    int opt;
+    int bad = 0;
 
-    if (argc != 3 || parse_int(argv[1], 1, 65535, &tcp_port) == -1 ||
-        parse_int(argv[2], 1, MAX_PORTS, &nports) == -1) {
-        fprintf(stderr, "usage: %s <tcp_port> <num_ports 1-%d>\n", argv[0], MAX_PORTS);
+    while ((opt = getopt(argc, argv, "a:k:m:w:")) != -1) {
+        if (opt == 'a')
+            bad |= parse_int(optarg, 1, 86400, &max_age);
+        else if (opt == 'k')
+            bad |= parse_int(optarg, 0, 1000000, &max_entries);
+        else if (opt == 'm')
+            bad |= parse_int(optarg, 0, 1000000, &max_per_port);
+        else if (opt == 'w')
+            bad |= parse_int(optarg, 0, 3600, &wait_secs);
+        else
+            bad = 1;
+    }
+
+    if (bad || argc - optind != 2 ||
+        parse_int(argv[optind], 1, 65535, &tcp_port) == -1 ||
+        parse_int(argv[optind + 1], 1, MAX_PORTS, &nports) == -1) {
+        fprintf(stderr,
+                "usage: %s [-a age_secs] [-k max_macs] [-m macs_per_port] [-w wait_secs]\n"
+                "          <tcp_port> <num_ports 1-%d>\n"
+                "defaults: -a 30 -k 1024 -m 16 -w 5 (0 for -k or -m means no limit)\n",
+                argv[0], MAX_PORTS);
         return 1;
     }
 
@@ -348,21 +463,38 @@ int main(int argc, char **argv)
         }
     }
 
-    int err = mac_table_init(&table);
+    int err = mac_table_init(&table, max_entries, max_per_port);
     if (err) {
         fprintf(stderr, "mac_table_init: %s\n", strerror(err));
         free_ports(nports);
         return 1;
     }
 
-    int listener = open_listener(tcp_port);
-    if (listener == -1) {
+    if (sem_init(&port_sem, 0, (unsigned int)nports) == -1) {
+        perror("sem_init");
         mac_table_destroy(&table);
         free_ports(nports);
         return 1;
     }
 
-    printf("switch listening on TCP %d with %d ports\n", tcp_port, nports);
+    pthread_condattr_t attr;
+    pthread_t age_thread;
+    if ((err = pthread_condattr_init(&attr)) ||
+        (err = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC)) ||
+        (err = pthread_cond_init(&age_cond, &attr)) ||
+        (err = pthread_condattr_destroy(&attr)) ||
+        (err = pthread_create(&age_thread, NULL, ager, NULL))) {
+        fprintf(stderr, "aging thread setup: %s\n", strerror(err));
+        return 1;
+    }
+
+    int listener = open_listener(tcp_port);
+    if (listener == -1)
+        return 1;
+
+    printf("switch listening on TCP %d with %d ports "
+           "(age %ds, max %d MACs, %d per port, wait %ds)\n",
+           tcp_port, nports, max_age, max_entries, max_per_port, wait_secs);
     accept_loop(listener);
     return 0;
 }

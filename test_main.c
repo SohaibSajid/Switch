@@ -143,7 +143,7 @@ static void *mover(void *arg)
 {
     const uint8_t *mac = arg;
     for (int i = 0; i < MOVES; i++)
-        mac_table_insert(&table, mac, i % 2 ? 100 : 101);
+        mac_table_insert(&table, mac, i % 2 ? 40 : 41);
     return NULL;
 }
 
@@ -153,7 +153,7 @@ static void *watcher(void *arg)
     intptr_t bad = 0;
     for (int i = 0; i < 5000; i++) {
         int p = mac_table_lookup(&table, mac);
-        if (p != 100 && p != 101)
+        if (p != 40 && p != 41)
             bad++;
     }
     return (void *)bad;
@@ -178,7 +178,7 @@ static void test_mac_threads(void)
     int err;
 
     CHECK(mac_parse("02:00:00:00:00:FE", roam) == 0);
-    CHECK(mac_table_insert(&table, roam, 100) == MAC_NEW);
+    CHECK(mac_table_insert(&table, roam, 40) == MAC_NEW);
 
     for (int i = 0; i < THREADS; i++) {
         err = pthread_create(&th[i], NULL, learner, (void *)(intptr_t)i);
@@ -212,15 +212,54 @@ static void test_mac_threads(void)
                 bad++;
         }
     CHECK(bad == 0);
-    CHECK(mac_table_lookup(&table, roam) == ((MOVES - 1) % 2 ? 100 : 101));
+    CHECK(mac_table_lookup(&table, roam) == ((MOVES - 1) % 2 ? 40 : 41));
 
     printf("mac thread tests done: %d threads, %zu entries\n",
            THREADS + 2, mac_table_count(&table));
 }
 
+static void test_mac_limits(void)
+{
+    struct mac_table t;
+    uint8_t a[MAC_LEN], b[MAC_LEN], c[MAC_LEN], d[MAC_LEN];
+
+    mac_parse("02:00:00:00:01:0A", a);
+    mac_parse("02:00:00:00:01:0B", b);
+    mac_parse("02:00:00:00:01:0C", c);
+    mac_parse("02:00:00:00:01:0D", d);
+
+    CHECK(mac_table_init(&t, 3, 0) == 0);
+    CHECK(mac_table_insert(&t, a, 1) == MAC_NEW);
+    CHECK(mac_table_insert(&t, b, 2) == MAC_NEW);
+    CHECK(mac_table_insert(&t, c, 3) == MAC_NEW);
+    CHECK(mac_table_lookup(&t, a) == 1);
+    CHECK(mac_table_insert(&t, d, 4) == MAC_NEW);
+    CHECK(mac_table_count(&t) == 3);
+    CHECK(mac_table_lookup(&t, b) == -1);
+    CHECK(mac_table_lookup(&t, a) == 1);
+    CHECK(mac_table_lookup(&t, d) == 4);
+    mac_table_destroy(&t);
+
+    CHECK(mac_table_init(&t, 0, 2) == 0);
+    CHECK(mac_table_insert(&t, a, 5) == MAC_NEW);
+    CHECK(mac_table_insert(&t, b, 5) == MAC_NEW);
+    CHECK(mac_table_insert(&t, c, 5) == MAC_LIMIT);
+    CHECK(mac_table_lookup(&t, c) == -1);
+    CHECK(mac_table_insert(&t, c, 6) == MAC_NEW);
+    CHECK(mac_table_insert(&t, c, 5) == MAC_LIMIT);
+    CHECK(mac_table_flush_port(&t, 5) == 2);
+    CHECK(mac_table_insert(&t, c, 5) == MAC_MOVED);
+    CHECK(mac_table_age(&t, 60) == 0);
+    CHECK(mac_table_age(&t, 0) == 1);
+    CHECK(mac_table_count(&t) == 0);
+    mac_table_destroy(&t);
+
+    printf("mac limit tests done\n");
+}
+
 int main(void)
 {
-    int err = mac_table_init(&table);
+    int err = mac_table_init(&table, 0, 0);
     if (err) {
         fprintf(stderr, "mac_table_init: %s\n", strerror(err));
         return 1;
@@ -229,6 +268,7 @@ int main(void)
     test_frame();
     test_mac_basic();
     test_mac_threads();
+    test_mac_limits();
 
     mac_table_destroy(&table);
 
