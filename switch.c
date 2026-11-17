@@ -14,8 +14,12 @@
 #include "frame.h"
 #include "mac_table.h"
 #include "net.h"
+#include "pkt.h"
+#include "queue.h"
+#include "sync.h"
 
 #define MAX_PORTS 64
+#define QUEUE_CAP 64
 
 enum { PORT_FREE, PORT_ACTIVE, PORT_DONE };
 
@@ -24,6 +28,8 @@ struct port {
     int fd;
     int state;
     pthread_t rx;
+    pthread_t tx;
+    struct queue q;
 };
 
 static struct port *ports;
@@ -31,47 +37,101 @@ static int nports;
 static pthread_mutex_t ports_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct mac_table table;
 
-static void lock(pthread_mutex_t *m)
-{
-    int err = pthread_mutex_lock(m);
-    if (err) {
-        fprintf(stderr, "pthread_mutex_lock: %s\n", strerror(err));
-        abort();
-    }
-}
-
-static void unlock(pthread_mutex_t *m)
-{
-    int err = pthread_mutex_unlock(m);
-    if (err) {
-        fprintf(stderr, "pthread_mutex_unlock: %s\n", strerror(err));
-        abort();
-    }
-}
-
 static void log_frame(int in, const struct frame_hdr *h,
-                      const uint8_t *payload, int out)
+                      const uint8_t *payload, const char *where)
 {
     char src[MAC_STR_LEN];
     char dst[MAC_STR_LEN];
     char text[64];
-    char where[32];
 
     mac_format(h->src, src);
     mac_format(h->dst, dst);
     frame_text(payload, h->len, text, sizeof text);
 
-    if (mac_is_broadcast(h->dst))
-        snprintf(where, sizeof where, "flood (broadcast)");
-    else if (out < 0)
-        snprintf(where, sizeof where, "flood (unknown)");
-    else if (out == in)
-        snprintf(where, sizeof where, "drop (same port)");
-    else
-        snprintf(where, sizeof where, "port %d", out);
-
     printf("port %d: %s -> %s vlan %u pri %u len %u \"%s\" => %s\n",
            in, src, dst, h->vlan, h->pri, h->len, text, where);
+}
+
+static int send_to(struct port *p, struct pkt *k)
+{
+    pkt_ref(k);
+    int r = queue_push(&p->q, k);
+    if (r != QUEUE_OK)
+        pkt_unref(k);
+    return r;
+}
+
+static void forward(struct port *in, struct pkt *k, char *where, size_t size)
+{
+    int bcast = mac_is_broadcast(k->hdr.dst);
+
+    if (!bcast) {
+        int out = mac_table_lookup(&table, k->hdr.dst);
+        if (out == in->id) {
+            snprintf(where, size, "drop (same port)");
+            return;
+        }
+        if (out > 0) {
+            int r = send_to(&ports[out - 1], k);
+            if (r == QUEUE_OK)
+                snprintf(where, size, "port %d", out);
+            else if (r == QUEUE_FULL)
+                snprintf(where, size, "port %d (dropped, queue full)", out);
+            else
+                snprintf(where, size, "port %d (dropped, port closed)", out);
+            return;
+        }
+    }
+
+    int sent = 0;
+    int full = 0;
+    for (int i = 0; i < nports; i++) {
+        if (&ports[i] == in)
+            continue;
+        int r = send_to(&ports[i], k);
+        if (r == QUEUE_OK)
+            sent++;
+        else if (r == QUEUE_FULL)
+            full++;
+    }
+    snprintf(where, size, "flood (%s, %d ports, %d dropped)",
+             bcast ? "broadcast" : "unknown", sent, full);
+}
+
+static void *sender(void *arg)
+{
+    struct port *p = arg;
+    struct pkt *k;
+
+    while ((k = queue_pop(&p->q))) {
+        int r = write_full(p->fd, k->data, k->size);
+        int saved = errno;
+        pkt_unref(k);
+        if (r == -1) {
+            printf("port %d: send failed (%s)\n", p->id, strerror(saved));
+            if (shutdown(p->fd, SHUT_RDWR) == -1 && errno != ENOTCONN)
+                perror("shutdown");
+            break;
+        }
+    }
+    return NULL;
+}
+
+static void close_port(struct port *p)
+{
+    unsigned long dropped = queue_close(&p->q);
+    int flushed = mac_table_flush_port(&table, p->id);
+
+    if (shutdown(p->fd, SHUT_RDWR) == -1 && errno != ENOTCONN)
+        perror("shutdown");
+    int err = pthread_join(p->tx, NULL);
+    if (err)
+        fprintf(stderr, "pthread_join: %s\n", strerror(err));
+    if (close(p->fd) == -1)
+        perror("close");
+
+    printf("port %d: closed, %lu frames dropped, %d MACs flushed\n",
+           p->id, dropped, flushed);
 }
 
 static void *receiver(void *arg)
@@ -79,6 +139,7 @@ static void *receiver(void *arg)
     struct port *p = arg;
     struct frame_hdr h;
     uint8_t payload[MAX_PAYLOAD];
+    char where[64];
     int r;
 
     while ((r = frame_read(p->fd, &h, payload)) == 1) {
@@ -89,8 +150,14 @@ static void *receiver(void *arg)
         if (mac_table_insert(&table, h.src, p->id) == MAC_ERR)
             fprintf(stderr, "port %d: MAC table insert failed\n", p->id);
 
-        int out = mac_is_broadcast(h.dst) ? -1 : mac_table_lookup(&table, h.dst);
-        log_frame(p->id, &h, payload, out);
+        struct pkt *k = pkt_new(&h, payload);
+        if (!k) {
+            perror("pkt_new");
+            continue;
+        }
+        forward(p, k, where, sizeof where);
+        pkt_unref(k);
+        log_frame(p->id, &h, payload, where);
     }
 
     if (r == 0)
@@ -98,8 +165,7 @@ static void *receiver(void *arg)
     else
         printf("port %d: closing (%s)\n", p->id, strerror(errno));
 
-    if (close(p->fd) == -1)
-        perror("close");
+    close_port(p);
 
     lock(&ports_lock);
     p->state = PORT_DONE;
@@ -174,6 +240,14 @@ static int open_listener(int tcp_port)
     return s;
 }
 
+static void free_ports(int n)
+{
+    for (int i = 0; i < n; i++)
+        queue_destroy(&ports[i].q);
+    free(ports);
+    ports = NULL;
+}
+
 static int parse_int(const char *s, int min, int max, int *out)
 {
     char *end;
@@ -208,11 +282,22 @@ static void accept_loop(int listener)
         }
 
         p->fd = fd;
-        int err = pthread_create(&p->rx, NULL, receiver, p);
+        queue_open(&p->q);
+
+        int err = pthread_create(&p->tx, NULL, sender, p);
         if (err) {
             fprintf(stderr, "pthread_create: %s\n", strerror(err));
+            queue_close(&p->q);
             if (close(fd) == -1)
                 perror("close");
+            release_port(p);
+            continue;
+        }
+
+        err = pthread_create(&p->rx, NULL, receiver, p);
+        if (err) {
+            fprintf(stderr, "pthread_create: %s\n", strerror(err));
+            close_port(p);
             release_port(p);
             continue;
         }
@@ -255,19 +340,25 @@ int main(int argc, char **argv)
         ports[i].id = i + 1;
         ports[i].fd = -1;
         ports[i].state = PORT_FREE;
+        int err = queue_init(&ports[i].q, QUEUE_CAP);
+        if (err) {
+            fprintf(stderr, "queue_init: %s\n", strerror(err));
+            free_ports(i);
+            return 1;
+        }
     }
 
     int err = mac_table_init(&table);
     if (err) {
         fprintf(stderr, "mac_table_init: %s\n", strerror(err));
-        free(ports);
+        free_ports(nports);
         return 1;
     }
 
     int listener = open_listener(tcp_port);
     if (listener == -1) {
         mac_table_destroy(&table);
-        free(ports);
+        free_ports(nports);
         return 1;
     }
 

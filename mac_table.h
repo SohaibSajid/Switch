@@ -32,6 +32,7 @@ int mac_table_init(struct mac_table *t);
 void mac_table_destroy(struct mac_table *t);
 int mac_table_lookup(struct mac_table *t, const uint8_t *mac);
 int mac_table_insert(struct mac_table *t, const uint8_t *mac, int port);
+int mac_table_flush_port(struct mac_table *t, int port);
 size_t mac_table_count(struct mac_table *t);
 
 #endif

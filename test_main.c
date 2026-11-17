@@ -108,6 +108,10 @@ static void test_mac_basic(void)
     CHECK(mac_table_insert(&table, a, 3) == MAC_MOVED);
     CHECK(mac_table_lookup(&table, a) == 3);
     CHECK(mac_table_count(&table) == 2);
+    CHECK(mac_table_flush_port(&table, 3) == 1);
+    CHECK(mac_table_lookup(&table, a) == -1);
+    CHECK(mac_table_lookup(&table, b) == 2);
+    CHECK(mac_table_count(&table) == 1);
 
     printf("mac basic tests done\n");
 }

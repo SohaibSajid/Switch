@@ -94,11 +94,18 @@ static void cmd_slow(const uint8_t *dst, const char *text)
     }
 }
 
-static void cmd_burst(const uint8_t *dst, int count)
+static void cmd_burst(const uint8_t *dst, int count, int size)
 {
-    char text[32];
+    char text[MAX_PAYLOAD + 1];
+
+    if (size > MAX_PAYLOAD)
+        size = MAX_PAYLOAD;
     for (int i = 0; i < count; i++) {
-        snprintf(text, sizeof text, "burst %d", i);
+        int n = snprintf(text, sizeof text, "burst %d", i);
+        if (n < size) {
+            memset(text + n, '.', (size_t)(size - n));
+            text[size] = '\0';
+        }
         cmd_send(dst, text);
     }
 }
@@ -121,7 +128,7 @@ static void help(void)
     printf("commands:\n"
            "  send <mac|bcast> <text>   send one frame\n"
            "  slow <mac|bcast> <text>   send one frame a byte at a time\n"
-           "  burst <mac|bcast> <n>     send n frames fast\n"
+           "  burst <mac|bcast> <n> [size]  send n frames fast\n"
            "  half <mac|bcast>          send half a frame, then quit\n"
            "  vlan <1-4094>             set vlan for next frames\n"
            "  pri <0-2>                 set priority for next frames\n"
@@ -182,8 +189,12 @@ static int run_line(char *line)
         cmd_send(dst, line + off);
     else if (strcmp(cmd, "slow") == 0)
         cmd_slow(dst, line + off);
-    else if (strcmp(cmd, "burst") == 0)
-        cmd_burst(dst, atoi(line + off));
+    else if (strcmp(cmd, "burst") == 0) {
+        int count = 0;
+        int size = 0;
+        sscanf(line + off, "%d %d", &count, &size);
+        cmd_burst(dst, count, size);
+    }
     else if (strcmp(cmd, "half") == 0) {
         cmd_half(dst);
         return 1;

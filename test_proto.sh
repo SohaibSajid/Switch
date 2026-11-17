@@ -32,10 +32,10 @@ printf 'vlan 20\npri 0\nsend bcast moved\nsleep 200\nquit\n' | ./host 127.0.0.1 
 printf '\xff\xff\x02\x00\x00\x00\x00\x0F\xff\xff\xff\xff\xff\xff\x00\x01\x01' > /dev/tcp/127.0.0.1/"$PORT"
 sleep 0.5
 
-check "frame to unknown MAC floods"    '"hello B" => flood (unknown)'
+check "frame to unknown MAC floods"    '"hello B" => flood (unknown'
 check "learned MAC is forwarded"       '"hello A" => port'
 check "byte-by-byte frame reassembled" '"split up" => port'
-check "50 back-to-back frames parsed"  '"burst 49" => flood (broadcast)'
+check "50 back-to-back frames parsed"  '"burst 49" => flood (broadcast'
 check "half frame closes the port"     'closing (Protocol error)'
 check "vlan and priority decoded"      'vlan 20 pri 0'
 check "bad length rejected"            'closing (Protocol error)'

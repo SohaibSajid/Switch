@@ -6,23 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void lock(pthread_mutex_t *m)
-{
-    int err = pthread_mutex_lock(m);
-    if (err) {
-        fprintf(stderr, "pthread_mutex_lock: %s\n", strerror(err));
-        abort();
-    }
-}
-
-static void unlock(pthread_mutex_t *m)
-{
-    int err = pthread_mutex_unlock(m);
-    if (err) {
-        fprintf(stderr, "pthread_mutex_unlock: %s\n", strerror(err));
-        abort();
-    }
-}
+#include "sync.h"
 
 static unsigned int mac_hash(const uint8_t *mac)
 {
@@ -128,6 +112,28 @@ int mac_table_insert(struct mac_table *t, const uint8_t *mac, int port)
         printf("MAC moved: port %d -> port %d (%s)\n", old, port, s);
     }
     return ret;
+}
+
+int mac_table_flush_port(struct mac_table *t, int port)
+{
+    int n = 0;
+    for (int i = 0; i < MAC_BUCKETS; i++) {
+        struct mac_bucket *b = &t->bucket[i];
+        lock(&b->lock);
+        struct mac_entry **link = &b->head;
+        while (*link) {
+            struct mac_entry *e = *link;
+            if (e->port == port) {
+                *link = e->next;
+                free(e);
+                n++;
+            } else {
+                link = &e->next;
+            }
+        }
+        unlock(&b->lock);
+    }
+    return n;
 }
 
 size_t mac_table_count(struct mac_table *t)
