@@ -1,12 +1,16 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "frame.h"
 #include "mac_table.h"
+#include "pkt.h"
+#include "queue.h"
 
 #define THREADS 8
 #define PER_THREAD 2000
@@ -112,6 +116,10 @@ static void test_mac_basic(void)
     CHECK(mac_table_lookup(&table, a) == -1);
     CHECK(mac_table_lookup(&table, b) == 2);
     CHECK(mac_table_count(&table) == 1);
+    CHECK(mac_table_insert(&table, a, 4) == MAC_NEW);
+    CHECK(mac_table_clear(&table) == 2);
+    CHECK(mac_table_count(&table) == 0);
+    CHECK(mac_table_lookup(&table, b) == -1);
 
     printf("mac basic tests done\n");
 }
@@ -220,7 +228,7 @@ static void test_mac_threads(void)
 
 static void test_mac_limits(void)
 {
-    struct mac_table t;
+    static struct mac_table t;
     uint8_t a[MAC_LEN], b[MAC_LEN], c[MAC_LEN], d[MAC_LEN];
 
     mac_parse("02:00:00:00:01:0A", a);
@@ -257,6 +265,298 @@ static void test_mac_limits(void)
     printf("mac limit tests done\n");
 }
 
+static void test_mac_trunk(void)
+{
+    static struct mac_table t;
+    uint8_t mac[MAC_LEN];
+
+    CHECK(mac_table_init(&t, 0, 2) == 0);
+    mac_table_set_trunk(&t, 9);
+    for (int n = 0; n < 6; n++) {
+        make_mac(3, n, mac);
+        CHECK(mac_table_insert(&t, mac, 9) == MAC_NEW);
+    }
+    make_mac(3, 100, mac);
+    CHECK(mac_table_insert(&t, mac, 4) == MAC_NEW);
+    make_mac(3, 101, mac);
+    CHECK(mac_table_insert(&t, mac, 4) == MAC_NEW);
+    make_mac(3, 102, mac);
+    CHECK(mac_table_insert(&t, mac, 4) == MAC_LIMIT);
+
+    /* when the port stops being the trunk the limit applies to it again */
+    mac_table_set_trunk(&t, 0);
+    make_mac(3, 103, mac);
+    CHECK(mac_table_insert(&t, mac, 9) == MAC_LIMIT);
+    mac_table_destroy(&t);
+
+    printf("mac trunk tests done\n");
+}
+
+static void test_mac_shm(void)
+{
+    const char *name = "/vswitch_test_mactable";
+    uint8_t mac[MAC_LEN];
+    int fixed = -1;
+
+    mac_table_shm_unlink(name);
+    struct mac_table *t1 = mac_table_shm_create(name, 100, 10);
+    CHECK(t1 != NULL);
+    if (!t1)
+        return;
+    for (int n = 0; n < 3; n++) {
+        make_mac(7, n, mac);
+        CHECK(mac_table_insert(t1, mac, n + 1) == MAC_NEW);
+    }
+
+    /* a second mapping sees the same entries */
+    struct mac_table *t2 = mac_table_shm_attach(name, &fixed);
+    CHECK(t2 != NULL);
+    CHECK(fixed == 0);
+    if (t2) {
+        make_mac(7, 1, mac);
+        CHECK(mac_table_lookup(t2, mac) == 2);
+        CHECK(mac_table_count(t2) == 3);
+        mac_table_shm_close(t2);
+    }
+
+    /* damage it the way a crash in the middle of an update could */
+    for (int b = 0; b < MAC_BUCKETS; b++)
+        if (t1->bucket[b].head != -1)
+            t1->pool[t1->bucket[b].head].next = MAC_POOL + 5;
+    atomic_store(&t1->count, 99);
+
+    t2 = mac_table_shm_attach(name, &fixed);
+    CHECK(t2 != NULL);
+    CHECK(fixed >= 1);
+    if (t2) {
+        CHECK(mac_table_count(t2) == 3);
+        CHECK(mac_table_port_count(t2, 1) + mac_table_port_count(t2, 2) +
+              mac_table_port_count(t2, 3) == 3);
+        make_mac(7, 9, mac);
+        CHECK(mac_table_insert(t2, mac, 5) == MAC_NEW);
+        mac_table_shm_close(t2);
+    }
+
+    mac_table_shm_close(t1);
+    mac_table_shm_unlink(name);
+    printf("mac shared memory tests done\n");
+}
+
+static struct pkt *mk(int pri, int id)
+{
+    struct frame_hdr h;
+    uint8_t body[1];
+
+    memset(&h, 0, sizeof h);
+    h.len = 1;
+    h.vlan = 1;
+    h.pri = (uint8_t)pri;
+    h.src[5] = 1;
+    h.dst[5] = 2;
+    body[0] = (uint8_t)id;
+    return pkt_new(&h, body);
+}
+
+static void ms_sleep(long ms)
+{
+    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+    while (nanosleep(&ts, &ts) == -1)
+        ;
+}
+
+static int elapsed_ms(const struct timespec *a, const struct timespec *b)
+{
+    return (int)((b->tv_sec - a->tv_sec) * 1000 + (b->tv_nsec - a->tv_nsec) / 1000000);
+}
+
+static void test_queue_wrr(void)
+{
+    struct queue q;
+    int w[3] = { 5, 3, 1 };
+    char got[64];
+    int n = 0;
+
+    CHECK(queue_init(&q, 64) == 0);
+    queue_set_qos(&q, w, 0);
+    queue_open(&q);
+
+    for (int i = 0; i < 10; i++)
+        CHECK(queue_push(&q, mk(PRI_LOW, i)) == QUEUE_OK);
+    for (int i = 0; i < 10; i++)
+        CHECK(queue_push(&q, mk(PRI_NORMAL, i)) == QUEUE_OK);
+    for (int i = 0; i < 10; i++)
+        CHECK(queue_push(&q, mk(PRI_HIGH, i)) == QUEUE_OK);
+    CHECK(queue_len(&q) == 30);
+
+    while (queue_len(&q) > 0) {
+        struct pkt *k = queue_pop(&q);
+        got[n++] = "HNL"[k->hdr.pri];
+        pkt_unref(k);
+    }
+    got[n] = '\0';
+    CHECK(n == 30);
+    CHECK(strncmp(got, "HHHHHNNNLHHHHHNNNL", 18) == 0);
+    /* nothing is lost and nothing is starved */
+    int c[3] = { 0, 0, 0 };
+    for (int i = 0; i < n; i++)
+        c[got[i] == 'H' ? 0 : got[i] == 'N' ? 1 : 2]++;
+    CHECK(c[0] == 10 && c[1] == 10 && c[2] == 10);
+
+    /* an empty class does not hold the others up */
+    for (int i = 0; i < 4; i++)
+        CHECK(queue_push(&q, mk(PRI_LOW, i)) == QUEUE_OK);
+    for (int i = 0; i < 4; i++) {
+        struct pkt *k = queue_pop(&q);
+        CHECK(k && k->hdr.pri == PRI_LOW);
+        pkt_unref(k);
+    }
+
+    /* full queue: drop and count, per class */
+    for (int i = 0; i < 64; i++)
+        CHECK(queue_push(&q, mk(PRI_NORMAL, i)) == QUEUE_OK);
+    struct pkt *extra = mk(PRI_NORMAL, 99);
+    CHECK(queue_push(&q, extra) == QUEUE_FULL);
+    pkt_unref(extra);
+    struct pkt *high = mk(PRI_HIGH, 1);
+    CHECK(queue_push(&q, high) == QUEUE_OK);
+    CHECK(queue_flush(&q) == 65);
+
+    queue_close(&q);
+    struct pkt *late = mk(PRI_HIGH, 2);
+    CHECK(queue_push(&q, late) == QUEUE_CLOSED);
+    pkt_unref(late);
+    queue_destroy(&q);
+
+    printf("queue scheduling tests done\n");
+}
+
+static void test_queue_aging(void)
+{
+    struct queue q;
+    int w[3] = { 5, 3, 1 };
+
+    CHECK(queue_init(&q, 16) == 0);
+    queue_set_qos(&q, w, 50);
+    queue_open(&q);
+
+    CHECK(queue_push(&q, mk(PRI_LOW, 1)) == QUEUE_OK);
+    ms_sleep(120);
+    for (int i = 0; i < 3; i++)
+        CHECK(queue_push(&q, mk(PRI_HIGH, i)) == QUEUE_OK);
+
+    struct pkt *k = queue_pop(&q);
+    CHECK(k && k->hdr.pri == PRI_LOW);
+    pkt_unref(k);
+    k = queue_pop(&q);
+    CHECK(k && k->hdr.pri == PRI_HIGH);
+    pkt_unref(k);
+
+    /* two aged frames: the high one gets in between */
+    CHECK(queue_push(&q, mk(PRI_LOW, 2)) == QUEUE_OK);
+    CHECK(queue_push(&q, mk(PRI_LOW, 3)) == QUEUE_OK);
+    ms_sleep(120);
+    k = queue_pop(&q);
+    CHECK(k && k->hdr.pri == PRI_LOW);
+    pkt_unref(k);
+    k = queue_pop(&q);
+    CHECK(k && k->hdr.pri == PRI_HIGH);
+    pkt_unref(k);
+
+    queue_close(&q);
+    queue_destroy(&q);
+    printf("queue aging tests done\n");
+}
+
+static atomic_int tick_stop;
+
+static void *ticker(void *arg)
+{
+    struct queue *q = arg;
+    while (!atomic_load(&tick_stop)) {
+        ms_sleep(10);
+        queue_refill(q, 10);
+    }
+    return NULL;
+}
+
+static void *popper(void *arg)
+{
+    struct pkt *k = queue_pop(arg);
+    if (k)
+        pkt_unref(k);
+    return k;
+}
+
+static void test_queue_rate(void)
+{
+    struct queue q;
+    int w[3] = { 5, 3, 1 };
+    pthread_t th;
+    struct timespec t0, t1;
+
+    CHECK(queue_init(&q, 64) == 0);
+    queue_set_qos(&q, w, 0);
+    queue_set_rate(&q, 100);
+    queue_open(&q);
+    atomic_store(&tick_stop, 0);
+    CHECK(pthread_create(&th, NULL, ticker, &q) == 0);
+
+    for (int i = 0; i < 30; i++)
+        CHECK(queue_push(&q, mk(PRI_NORMAL, i)) == QUEUE_OK);
+
+    /* 100 frames/s, bucket of 10: 30 frames need about 200 ms after the burst */
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (int i = 0; i < 30; i++) {
+        struct pkt *k = queue_pop(&q);
+        CHECK(k != NULL);
+        if (k)
+            pkt_unref(k);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    int took = elapsed_ms(&t0, &t1);
+    CHECK(took >= 150 && took <= 450);
+    if (took < 150 || took > 450)
+        fprintf(stderr, "rate test took %d ms\n", took);
+
+    atomic_store(&tick_stop, 1);
+    CHECK(pthread_join(th, NULL) == 0);
+    queue_close(&q);
+    queue_destroy(&q);
+    printf("queue rate limit tests done (%d ms)\n", took);
+}
+
+static void test_queue_close(void)
+{
+    struct queue q;
+    pthread_t th;
+    void *res = &q;
+
+    CHECK(queue_init(&q, 8) == 0);
+    queue_open(&q);
+    CHECK(pthread_create(&th, NULL, popper, &q) == 0);
+    ms_sleep(50);
+    queue_close(&q);
+    CHECK(pthread_join(th, &res) == 0);
+    CHECK(res == NULL);
+
+    /* the same for a sender that is waiting for tokens */
+    queue_open(&q);
+    queue_set_rate(&q, 1);
+    CHECK(queue_push(&q, mk(PRI_HIGH, 1)) == QUEUE_OK);
+    CHECK(queue_push(&q, mk(PRI_HIGH, 2)) == QUEUE_OK);
+    struct pkt *k = queue_pop(&q);
+    CHECK(k != NULL);
+    if (k)
+        pkt_unref(k);
+    CHECK(pthread_create(&th, NULL, popper, &q) == 0);
+    ms_sleep(50);
+    queue_close(&q);
+    CHECK(pthread_join(th, &res) == 0);
+    CHECK(res == NULL);
+    queue_destroy(&q);
+    printf("queue close tests done\n");
+}
+
 int main(void)
 {
     int err = mac_table_init(&table, 0, 0);
@@ -269,6 +569,12 @@ int main(void)
     test_mac_basic();
     test_mac_threads();
     test_mac_limits();
+    test_mac_trunk();
+    test_mac_shm();
+    test_queue_wrr();
+    test_queue_aging();
+    test_queue_rate();
+    test_queue_close();
 
     mac_table_destroy(&table);
 

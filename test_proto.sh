@@ -16,7 +16,8 @@ check() {
     fi
 }
 
-$SWITCH "$PORT" 4 > "$LOG" 2>&1 &
+rm -f "$LOG"
+$SWITCH -f -l "$LOG" "$PORT" 4 > /dev/null 2>&1 &
 SW=$!
 sleep "${WARMUP:-0.3}"
 
@@ -37,7 +38,7 @@ check "learned MAC is forwarded"       '"hello A" => port'
 check "byte-by-byte frame reassembled" '"split up" => port'
 check "50 back-to-back frames parsed"  '"burst 49" => flood (broadcast'
 check "half frame closes the port"     'closing (Protocol error)'
-check "vlan and priority decoded"      'vlan 20 pri 0'
+check "port vlan wins, priority decoded"  'vlan 1 pri 0'
 check "bad length rejected"            'closing (Protocol error)'
 check "switch still running"           'host connected'
 

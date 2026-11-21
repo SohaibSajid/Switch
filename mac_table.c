@@ -2,10 +2,15 @@
 
 #include "mac_table.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
+#include "log.h"
 #include "sync.h"
 
 #define EVICT_TRIES 8
@@ -35,27 +40,65 @@ static unsigned long tick(struct mac_table *t)
     return atomic_fetch_add(&t->clock, 1) + 1;
 }
 
-static struct mac_entry *find(struct mac_bucket *b, const uint8_t *mac)
+/* the mutexes are robust: if a switch process dies while holding one, the
+ * next owner gets EOWNERDEAD and marks it consistent again */
+static void tlock(pthread_mutex_t *m)
 {
-    for (struct mac_entry *e = b->head; e; e = e->next)
-        if (memcmp(e->mac, mac, MAC_LEN) == 0)
-            return e;
-    return NULL;
+    int err = pthread_mutex_lock(m);
+    if (err == EOWNERDEAD)
+        err = pthread_mutex_consistent(m);
+    if (err)
+        die_err("mac table lock", err);
 }
 
-static void unlink_entry(struct mac_table *t, struct mac_entry **link)
+static int find(struct mac_table *t, struct mac_bucket *b, const uint8_t *mac)
 {
-    struct mac_entry *e = *link;
-    *link = e->next;
-    atomic_fetch_sub(&t->per_port[e->port], 1);
+    for (int i = b->head; i != -1; i = t->pool[i].next)
+        if (memcmp(t->pool[i].mac, mac, MAC_LEN) == 0)
+            return i;
+    return -1;
+}
+
+static int entry_alloc(struct mac_table *t)
+{
+    tlock(&t->free_lock);
+    int i = t->free_head;
+    if (i != -1)
+        t->free_head = t->pool[i].next;
+    unlock(&t->free_lock);
+    return i;
+}
+
+static void entry_free(struct mac_table *t, int i)
+{
+    tlock(&t->free_lock);
+    t->pool[i].next = t->free_head;
+    t->free_head = i;
+    unlock(&t->free_lock);
+}
+
+/* remove *link from its chain; the bucket lock is held */
+static void unlink_entry(struct mac_table *t, int *link)
+{
+    int i = *link;
+    *link = t->pool[i].next;
+    atomic_fetch_sub(&t->per_port[t->pool[i].port], 1);
     atomic_fetch_sub(&t->count, 1);
-    free(e);
+    entry_free(t, i);
+}
+
+static int limit(struct mac_table *t)
+{
+    int k = atomic_load(&t->max_entries);
+    return k > 0 && k < MAC_POOL ? k : MAC_POOL;
 }
 
 static int port_has_room(struct mac_table *t, int port)
 {
-    int limit = atomic_load(&t->max_per_port);
-    return limit == 0 || atomic_load(&t->per_port[port]) < limit;
+    if (port == atomic_load(&t->trunk_port))
+        return 1;
+    int m = atomic_load(&t->max_per_port);
+    return m == 0 || atomic_load(&t->per_port[port]) < m;
 }
 
 static int evict_lru(struct mac_table *t)
@@ -65,11 +108,11 @@ static int evict_lru(struct mac_table *t)
     int found = 0;
 
     for (int i = 0; i < MAC_BUCKETS; i++) {
-        lock(&t->bucket[i].lock);
-        for (struct mac_entry *e = t->bucket[i].head; e; e = e->next) {
-            if (!found || e->use < oldest) {
-                oldest = e->use;
-                memcpy(victim, e->mac, MAC_LEN);
+        tlock(&t->bucket[i].lock);
+        for (int e = t->bucket[i].head; e != -1; e = t->pool[e].next) {
+            if (!found || t->pool[e].use < oldest) {
+                oldest = t->pool[e].use;
+                memcpy(victim, t->pool[e].mac, MAC_LEN);
                 found = 1;
             }
         }
@@ -80,10 +123,10 @@ static int evict_lru(struct mac_table *t)
 
     struct mac_bucket *b = &t->bucket[mac_hash(victim)];
     int removed = 0;
-    lock(&b->lock);
-    for (struct mac_entry **link = &b->head; *link; link = &(*link)->next) {
-        if (memcmp((*link)->mac, victim, MAC_LEN) == 0) {
-            if ((*link)->use == oldest) {
+    tlock(&b->lock);
+    for (int *link = &b->head; *link != -1; link = &t->pool[*link].next) {
+        if (memcmp(t->pool[*link].mac, victim, MAC_LEN) == 0) {
+            if (t->pool[*link].use == oldest) {
                 unlink_entry(t, link);
                 removed = 1;
             }
@@ -95,21 +138,18 @@ static int evict_lru(struct mac_table *t)
     if (removed) {
         char s[MAC_STR_LEN];
         mac_format(victim, s);
-        printf("MAC table full, evicted LRU entry %s\n", s);
+        log_msg("MAC table full, evicted LRU entry %s", s);
     }
     return removed;
 }
 
+/* take one slot of the size limit, evicting the oldest entry if needed */
 static int reserve(struct mac_table *t)
 {
-    int limit = atomic_load(&t->max_entries);
-    if (limit == 0) {
-        atomic_fetch_add(&t->count, 1);
-        return 0;
-    }
     for (int tries = 0; tries < EVICT_TRIES;) {
+        int k = limit(t);
         int c = atomic_load(&t->count);
-        if (c < limit) {
+        if (c < k) {
             if (atomic_compare_exchange_weak(&t->count, &c, c + 1))
                 return 0;
             continue;
@@ -120,52 +160,60 @@ static int reserve(struct mac_table *t)
     return -1;
 }
 
-int mac_table_init(struct mac_table *t, int max_entries, int max_per_port)
+static int setup(struct mac_table *t, int max_entries, int max_per_port, int shared)
 {
+    pthread_mutexattr_t attr;
+    int err;
+
     atomic_init(&t->max_entries, max_entries);
     atomic_init(&t->max_per_port, max_per_port);
+    atomic_init(&t->trunk_port, 0);
     atomic_init(&t->count, 0);
     atomic_init(&t->clock, 0);
     for (int i = 0; i <= MAC_MAX_PORT; i++)
         atomic_init(&t->per_port[i], 0);
 
-    for (int i = 0; i < MAC_BUCKETS; i++) {
-        t->bucket[i].head = NULL;
-        int err = pthread_mutex_init(&t->bucket[i].lock, NULL);
-        if (err) {
-            while (--i >= 0)
-                pthread_mutex_destroy(&t->bucket[i].lock);
-            return err;
-        }
+    for (int i = 0; i < MAC_POOL; i++)
+        t->pool[i].next = i + 1 < MAC_POOL ? i + 1 : -1;
+    t->free_head = 0;
+
+    if ((err = pthread_mutexattr_init(&attr)) ||
+        (err = pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST)) ||
+        (shared && (err = pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED))))
+        return err;
+
+    err = pthread_mutex_init(&t->free_lock, &attr);
+    for (int i = 0; !err && i < MAC_BUCKETS; i++) {
+        t->bucket[i].head = -1;
+        err = pthread_mutex_init(&t->bucket[i].lock, &attr);
     }
-    return 0;
+    int err2 = pthread_mutexattr_destroy(&attr);
+    return err ? err : err2;
+}
+
+int mac_table_init(struct mac_table *t, int max_entries, int max_per_port)
+{
+    return setup(t, max_entries, max_per_port, 0);
 }
 
 void mac_table_destroy(struct mac_table *t)
 {
-    for (int i = 0; i < MAC_BUCKETS; i++) {
-        struct mac_entry *e = t->bucket[i].head;
-        while (e) {
-            struct mac_entry *next = e->next;
-            free(e);
-            e = next;
-        }
-        t->bucket[i].head = NULL;
+    for (int i = 0; i < MAC_BUCKETS; i++)
         pthread_mutex_destroy(&t->bucket[i].lock);
-    }
+    pthread_mutex_destroy(&t->free_lock);
 }
 
 int mac_table_lookup(struct mac_table *t, const uint8_t *mac)
 {
     struct mac_bucket *b = &t->bucket[mac_hash(mac)];
     unsigned long use = tick(t);
-
-    lock(&b->lock);
-    struct mac_entry *e = find(b, mac);
     int port = -1;
-    if (e) {
-        port = e->port;
-        e->use = use;
+
+    tlock(&b->lock);
+    int e = find(t, b, mac);
+    if (e != -1) {
+        port = t->pool[e].port;
+        t->pool[e].use = use;
     }
     unlock(&b->lock);
 
@@ -183,10 +231,10 @@ int mac_table_insert(struct mac_table *t, const uint8_t *mac, int port)
     int old = -1;
     int ret = MAC_SAME;
 
-    lock(&b->lock);
-    struct mac_entry *e = find(b, mac);
-    if (e) {
-        old = e->port;
+    tlock(&b->lock);
+    int e = find(t, b, mac);
+    if (e != -1) {
+        old = t->pool[e].port;
         if (old != port) {
             if (!port_has_room(t, port)) {
                 unlock(&b->lock);
@@ -194,20 +242,20 @@ int mac_table_insert(struct mac_table *t, const uint8_t *mac, int port)
             }
             atomic_fetch_sub(&t->per_port[old], 1);
             atomic_fetch_add(&t->per_port[port], 1);
-            e->port = port;
+            t->pool[e].port = port;
             ret = MAC_MOVED;
         }
-        e->seen = ts;
-        e->use = use;
+        t->pool[e].seen = ts;
+        t->pool[e].use = use;
     }
     unlock(&b->lock);
 
     if (ret == MAC_MOVED) {
         char s[MAC_STR_LEN];
         mac_format(mac, s);
-        printf("MAC moved: port %d -> port %d (%s)\n", old, port, s);
+        log_msg("MAC moved: port %d -> port %d (%s)", old, port, s);
     }
-    if (e)
+    if (e != -1)
         return ret;
 
     if (!port_has_room(t, port))
@@ -215,25 +263,25 @@ int mac_table_insert(struct mac_table *t, const uint8_t *mac, int port)
     if (reserve(t) == -1)
         return MAC_ERR;
 
-    e = malloc(sizeof *e);
-    if (!e) {
-        perror("malloc");
+    e = entry_alloc(t);
+    if (e == -1) {
         atomic_fetch_sub(&t->count, 1);
         return MAC_ERR;
     }
 
-    lock(&b->lock);
-    if (find(b, mac)) {
+    tlock(&b->lock);
+    if (find(t, b, mac) != -1) {
+        /* somebody else learned it while we were not holding the lock */
         unlock(&b->lock);
-        free(e);
+        entry_free(t, e);
         atomic_fetch_sub(&t->count, 1);
         return mac_table_insert(t, mac, port);
     }
-    memcpy(e->mac, mac, MAC_LEN);
-    e->port = port;
-    e->seen = ts;
-    e->use = use;
-    e->next = b->head;
+    memcpy(t->pool[e].mac, mac, MAC_LEN);
+    t->pool[e].port = port;
+    t->pool[e].seen = ts;
+    t->pool[e].use = use;
+    t->pool[e].next = b->head;
     b->head = e;
     atomic_fetch_add(&t->per_port[port], 1);
     unlock(&b->lock);
@@ -246,14 +294,14 @@ int mac_table_flush_port(struct mac_table *t, int port)
     int n = 0;
     for (int i = 0; i < MAC_BUCKETS; i++) {
         struct mac_bucket *b = &t->bucket[i];
-        lock(&b->lock);
-        struct mac_entry **link = &b->head;
-        while (*link) {
-            if ((*link)->port == port) {
+        tlock(&b->lock);
+        int *link = &b->head;
+        while (*link != -1) {
+            if (t->pool[*link].port == port) {
                 unlink_entry(t, link);
                 n++;
             } else {
-                link = &(*link)->next;
+                link = &t->pool[*link].next;
             }
         }
         unlock(&b->lock);
@@ -268,17 +316,18 @@ int mac_table_age(struct mac_table *t, int max_age)
 
     for (int i = 0; i < MAC_BUCKETS; i++) {
         struct mac_bucket *b = &t->bucket[i];
-        lock(&b->lock);
-        struct mac_entry **link = &b->head;
-        while (*link) {
-            if (ts - (*link)->seen >= max_age) {
+        tlock(&b->lock);
+        int *link = &b->head;
+        while (*link != -1) {
+            struct mac_entry *e = &t->pool[*link];
+            if (ts - e->seen >= max_age) {
                 char s[MAC_STR_LEN];
-                mac_format((*link)->mac, s);
-                printf("MAC aged out: %s (port %d)\n", s, (*link)->port);
+                mac_format(e->mac, s);
+                log_msg("MAC aged out: %s (port %d)", s, e->port);
                 unlink_entry(t, link);
                 n++;
             } else {
-                link = &(*link)->next;
+                link = &e->next;
             }
         }
         unlock(&b->lock);
@@ -297,6 +346,11 @@ void mac_table_set_limits(struct mac_table *t, int max_entries, int max_per_port
     atomic_store(&t->max_per_port, max_per_port);
 }
 
+void mac_table_set_trunk(struct mac_table *t, int port)
+{
+    atomic_store(&t->trunk_port, port);
+}
+
 int mac_table_dump(struct mac_table *t, FILE *f)
 {
     time_t ts = now();
@@ -304,14 +358,158 @@ int mac_table_dump(struct mac_table *t, FILE *f)
 
     fprintf(f, "%-17s  %4s  %s\n", "MAC", "PORT", "IDLE");
     for (int i = 0; i < MAC_BUCKETS; i++) {
-        lock(&t->bucket[i].lock);
-        for (struct mac_entry *e = t->bucket[i].head; e; e = e->next) {
+        tlock(&t->bucket[i].lock);
+        for (int e = t->bucket[i].head; e != -1; e = t->pool[e].next) {
             char s[MAC_STR_LEN];
-            mac_format(e->mac, s);
-            fprintf(f, "%-17s  %4d  %lds\n", s, e->port, (long)(ts - e->seen));
+            mac_format(t->pool[e].mac, s);
+            fprintf(f, "%-17s  %4d  %lds\n", s, t->pool[e].port,
+                    (long)(ts - t->pool[e].seen));
             n++;
         }
         unlock(&t->bucket[i].lock);
     }
     return n;
+}
+
+/* takes every bucket lock, lowest first, so nobody sees half a clear */
+int mac_table_clear(struct mac_table *t)
+{
+    int n = 0;
+
+    for (int i = 0; i < MAC_BUCKETS; i++)
+        tlock(&t->bucket[i].lock);
+
+    for (int i = 0; i < MAC_BUCKETS; i++) {
+        int *link = &t->bucket[i].head;
+        while (*link != -1) {
+            unlink_entry(t, link);
+            n++;
+        }
+    }
+
+    for (int i = MAC_BUCKETS - 1; i >= 0; i--)
+        unlock(&t->bucket[i].lock);
+    return n;
+}
+
+int mac_table_port_count(struct mac_table *t, int port)
+{
+    if (port < 1 || port > MAC_MAX_PORT)
+        return 0;
+    return atomic_load(&t->per_port[port]);
+}
+
+/* ---- shared memory, used by the supervisor ---- */
+
+/* After a crash: nobody else is using the table, so walk it, throw away
+ * anything that does not look right and rebuild the counters and the free
+ * list from what is left. */
+static void repair(struct mac_table *t, int *fixed)
+{
+    static unsigned char seen[MAC_POOL];
+    int kept = 0;
+    int dropped = 0;
+
+    memset(seen, 0, sizeof seen);
+    tlock(&t->free_lock);
+    unlock(&t->free_lock);
+    for (int i = 0; i <= MAC_MAX_PORT; i++)
+        atomic_store(&t->per_port[i], 0);
+
+    for (int b = 0; b < MAC_BUCKETS; b++) {
+        tlock(&t->bucket[b].lock);
+        int *link = &t->bucket[b].head;
+        while (*link != -1) {
+            int i = *link;
+            struct mac_entry *e = i >= 0 && i < MAC_POOL ? &t->pool[i] : NULL;
+            if (!e || seen[i] || e->port < 1 || e->port > MAC_MAX_PORT ||
+                mac_hash(e->mac) != (unsigned int)b) {
+                *link = -1;
+                dropped++;
+                break;
+            }
+            seen[i] = 1;
+            kept++;
+            atomic_fetch_add(&t->per_port[e->port], 1);
+            link = &e->next;
+        }
+        unlock(&t->bucket[b].lock);
+    }
+    atomic_store(&t->count, kept);
+
+    t->free_head = -1;
+    for (int i = MAC_POOL - 1; i >= 0; i--) {
+        if (!seen[i]) {
+            t->pool[i].next = t->free_head;
+            t->free_head = i;
+        }
+    }
+    if (fixed)
+        *fixed = dropped;
+}
+
+static struct mac_table *map(const char *name, int create)
+{
+    int fd = shm_open(name, create ? O_CREAT | O_EXCL | O_RDWR : O_RDWR, 0600);
+    if (fd == -1) {
+        if (create || errno != ENOENT)
+            perror(name);
+        return NULL;
+    }
+    if (create && ftruncate(fd, sizeof(struct mac_table)) == -1) {
+        perror("ftruncate");
+        close(fd);
+        shm_unlink(name);
+        return NULL;
+    }
+    struct mac_table *t = mmap(NULL, sizeof *t, PROT_READ | PROT_WRITE,
+                               MAP_SHARED, fd, 0);
+    int saved = errno;
+    if (close(fd) == -1)
+        perror("close");
+    if (t == MAP_FAILED) {
+        errno = saved;
+        perror("mmap");
+        if (create)
+            shm_unlink(name);
+        return NULL;
+    }
+    return t;
+}
+
+struct mac_table *mac_table_shm_create(const char *name, int max_entries, int max_per_port)
+{
+    struct mac_table *t = map(name, 1);
+    if (!t)
+        return NULL;
+    int err = setup(t, max_entries, max_per_port, 1);
+    if (err) {
+        fprintf(stderr, "mac table init: %s\n", strerror(err));
+        munmap(t, sizeof *t);
+        shm_unlink(name);
+        return NULL;
+    }
+    return t;
+}
+
+/* NULL if there is no table yet; *fixed is the number of broken entries
+ * that had to be thrown away */
+struct mac_table *mac_table_shm_attach(const char *name, int *fixed)
+{
+    struct mac_table *t = map(name, 0);
+    if (t)
+        repair(t, fixed);
+    return t;
+}
+
+void mac_table_shm_close(struct mac_table *t)
+{
+    if (munmap(t, sizeof *t) == -1)
+        perror("munmap");
+}
+
+void mac_table_shm_unlink(const char *name)
+{
+    if (shm_unlink(name) == -1 && errno != ENOENT)
+        perror("shm_unlink");
 }

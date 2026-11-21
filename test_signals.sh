@@ -33,7 +33,8 @@ wait_log() {
 
 printf '# test config\nage = 60\nmax_macs = 100\nmacs_per_port = 8\nwait = 1\n' > "$CFG"
 
-$SWITCH -c "$CFG" -d "$DUMP" "$PORT" 4 > "$LOG" 2>&1 &
+rm -f "$LOG"
+$SWITCH -c "$CFG" -d "$DUMP" -l "$LOG" "$PORT" 4 > /dev/null 2>&1 &
 SW=$!
 sleep "${WARMUP:-0.3}"
 

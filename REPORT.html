@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Virtual Switch - project report</title>
+<style>
+  @page { size: A4; margin: 13mm 14mm; }
+  body { font-family: Helvetica, Arial, sans-serif; font-size: 9.3pt; line-height: 1.36; color: #1a1a1a; max-width: 182mm; margin: 0 auto; }
+  h1 { font-size: 16pt; margin: 0 0 2px; }
+  h2 { font-size: 11pt; margin: 11px 0 4px; border-bottom: 1px solid #bbb; padding-bottom: 1px; }
+  p { margin: 3px 0 5px; }
+  .sub { color: #555; margin-bottom: 6px; }
+  table { border-collapse: collapse; width: 100%; margin: 4px 0 6px; font-size: 8.6pt; }
+  th, td { border: 1px solid #c9c9c9; padding: 2px 5px; vertical-align: top; text-align: left; }
+  th { background: #f1f1f1; }
+  code { font-family: "DejaVu Sans Mono", Menlo, monospace; font-size: 8.4pt; }
+  ol, ul { margin: 3px 0 5px 18px; padding: 0; }
+  li { margin: 1px 0; }
+  svg { width: 100%; height: auto; display: block; margin: 4px 0; }
+  .nobreak { break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<h1>Virtual Switch</h1>
+<div class="sub">Operating Systems, Fall 2026 - project report</div>
+
+<h2>1. What is finished</h2>
+<table>
+<tr><th>Tier</th><th>Items</th><th>State</th></tr>
+<tr><td>Tier 1</td><td>1 wire protocol, 2 no head-of-line blocking, 3 reference counted broadcast, 4 concurrent MAC table, 5 port semaphore</td><td>done</td></tr>
+<tr><td>Tier 2</td><td>6 QoS (WRR 5:3:1 + aging), 7 token bucket, 8 VLANs and trunk, 9 mirroring, 10 live reconfiguration, 11 <code>swctl</code> + shared memory counters, 12 signals, 13 logger thread</td><td>all done</td></tr>
+<tr><td>Tier 3</td><td>two switches joined by two pipes (<code>switch_pair</code>), supervisor with the MAC table in shared memory (<code>supervisor</code>), benchmark (<code>bench</code>)</td><td>all three done</td></tr>
+</table>
+<p>Everything builds with <code>gcc -std=c11 -Wall -Wextra -Werror -g -O0</code>. The test suite (<code>make test</code>: unit tests plus 11 scripts with about 150 checks) passes on the normal build, on a ThreadSanitizer build and under <code>valgrind --leak-check=full</code>, both without a single report.</p>
+
+<h2>2. Threads</h2>
+<div class="nobreak">
+<svg viewBox="0 0 760 292" font-family="Helvetica, Arial, sans-serif" font-size="11" role="img" aria-label="Thread diagram">
+  <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#444"/></marker></defs>
+  <rect x="4" y="12" width="92" height="58" fill="#f6f6f6" stroke="#666"/>
+  <text x="50" y="36" text-anchor="middle">host A</text><text x="50" y="52" text-anchor="middle" fill="#555">TCP, port 1</text>
+  <rect x="140" y="12" width="136" height="58" fill="#e6f1fb" stroke="#185fa5"/>
+  <text x="208" y="32" text-anchor="middle" font-weight="bold">receiver, port 1</text>
+  <text x="208" y="48" text-anchor="middle">read frame, learn,</text><text x="208" y="62" text-anchor="middle">look up, enqueue</text>
+  <rect x="140" y="104" width="136" height="42" fill="#eeedfe" stroke="#534ab7"/>
+  <text x="208" y="122" text-anchor="middle" font-weight="bold">MAC table</text><text x="208" y="138" text-anchor="middle">32 buckets, 1 lock each</text>
+  <rect x="330" y="12" width="150" height="58" fill="#e1f5ee" stroke="#0f6e56"/>
+  <text x="405" y="30" text-anchor="middle" font-weight="bold">output queue, port 2</text>
+  <text x="405" y="46" text-anchor="middle">high / normal / low rings</text><text x="405" y="60" text-anchor="middle">bounded, token bucket</text>
+  <rect x="528" y="12" width="136" height="58" fill="#e6f1fb" stroke="#185fa5"/>
+  <text x="596" y="32" text-anchor="middle" font-weight="bold">sender, port 2</text>
+  <text x="596" y="48" text-anchor="middle">WRR + aging, waits for</text><text x="596" y="62" text-anchor="middle">tokens, write()</text>
+  <rect x="704" y="12" width="52" height="58" fill="#f6f6f6" stroke="#666"/><text x="730" y="46" text-anchor="middle">host B</text>
+  <line x1="96" y1="41" x2="138" y2="41" stroke="#444" marker-end="url(#a)"/>
+  <line x1="276" y1="41" x2="328" y2="41" stroke="#444" marker-end="url(#a)"/>
+  <line x1="480" y1="41" x2="526" y2="41" stroke="#444" marker-end="url(#a)"/>
+  <line x1="664" y1="41" x2="702" y2="41" stroke="#444" marker-end="url(#a)"/>
+  <line x1="208" y1="70" x2="208" y2="102" stroke="#444" marker-end="url(#a)"/>
+  <text x="700" y="100" text-anchor="end" fill="#555">One receiver and one sender for every connected port. The receiver never writes to a socket.</text>
+
+  <text x="4" y="176" font-weight="bold">helper threads (one each)</text>
+  <rect x="4" y="184" width="112" height="46" fill="#faeeda" stroke="#854f0b"/><text x="60" y="203" text-anchor="middle" font-weight="bold">accept (main)</text><text x="60" y="219" text-anchor="middle">poll + accept</text>
+  <rect x="124" y="184" width="112" height="46" fill="#faeeda" stroke="#854f0b"/><text x="180" y="203" text-anchor="middle" font-weight="bold">waiters</text><text x="180" y="219" text-anchor="middle">sem_timedwait</text>
+  <rect x="244" y="184" width="100" height="46" fill="#faeeda" stroke="#854f0b"/><text x="294" y="203" text-anchor="middle" font-weight="bold">aging</text><text x="294" y="219" text-anchor="middle">every 1 s</text>
+  <rect x="352" y="184" width="110" height="46" fill="#faeeda" stroke="#854f0b"/><text x="407" y="203" text-anchor="middle" font-weight="bold">token timer</text><text x="407" y="219" text-anchor="middle">refill, every 10 ms</text>
+  <rect x="470" y="184" width="96" height="46" fill="#faeeda" stroke="#854f0b"/><text x="518" y="203" text-anchor="middle" font-weight="bold">signals</text><text x="518" y="219" text-anchor="middle">sigwait</text>
+  <rect x="574" y="184" width="96" height="46" fill="#faeeda" stroke="#854f0b"/><text x="622" y="203" text-anchor="middle" font-weight="bold">admin</text><text x="622" y="219" text-anchor="middle">UNIX socket</text>
+  <rect x="678" y="184" width="78" height="46" fill="#faeeda" stroke="#854f0b"/><text x="717" y="203" text-anchor="middle" font-weight="bold">logger</text><text x="717" y="219" text-anchor="middle">log file</text>
+  <text x="4" y="256" fill="#444">accept: gives a host a free port at once if the semaphore has one, otherwise starts a waiter thread for that host (they wait in parallel).</text>
+  <text x="4" y="271" fill="#444">timer and aging sleep on a condition variable with a timeout; admin and signals change ports, queues and the MAC table; every thread</text>
+  <text x="4" y="286" fill="#444">sends log messages to the logger through its queue. With a pipe link there is one more receiver/sender pair for it (the trunk).</text>
+</svg>
+</div>
+
+<h2>3. Locks and what they protect</h2>
+<table>
+<tr><th style="width:26%">Lock</th><th>Protects</th></tr>
+<tr><td><code>ports_lock</code> (+ <code>port_cv</code>)</td><td>the port table: <code>state</code> of every port (free, active, done), the <code>down</code> flag, thread ids, the fd. Changes of state are signalled on <code>port_cv</code>.</td></tr>
+<tr><td><code>port->lock</code>, one per port</td><td><code>vlan</code>, <code>trunk</code>, <code>mirror_to</code>. The data path reads them for each frame; the admin changes them.</td></tr>
+<tr><td><code>queue->lock</code> + <code>wake</code> cond, one per port</td><td>the three rings, <code>closing</code>, drop counter, the scheduler state (WRR credit, aging) and the token bucket. The sender sleeps on <code>wake</code> when the queue is empty and waits on it with a timeout when it has no tokens.</td></tr>
+<tr><td>MAC bucket locks (32) and <code>free_lock</code></td><td>the chain of entries in a bucket; the list of free entries. Entry counters, limits and the LRU clock are atomics. Robust, so that a crashed switch does not leave the table locked.</td></tr>
+<tr><td><code>pkt->lock</code></td><td>the reference count of a frame: <code>refs--</code> and the test for zero happen together.</td></tr>
+<tr><td>stats mutex (process-shared, robust)</td><td>the counters in shared memory, read by <code>swctl</code> in another process.</td></tr>
+<tr><td>log lock</td><td>the ring of log messages.</td></tr>
+<tr><td><code>tick_lock</code> / <code>wait_lock</code></td><td>the sleep of the aging and token threads and the <code>stopping</code> flag; the count of waiting hosts and the done flags of waiter threads.</td></tr>
+<tr><td><code>port_sem</code> (semaphore)</td><td>the number of free ports. A host takes a token with <code>sem_trywait</code> or <code>sem_timedwait</code>, a leaving host gives it back; an admin <code>shutdown</code> keeps it.</td></tr>
+</table>
+
+<h2>4. Lock order (item 10)</h2>
+<p>Whenever a thread needs more than one lock it takes them in this order and never the other way round. It is also written at the top of <code>switch.c</code>.</p>
+<ol>
+<li><code>ports_lock</code></li>
+<li><code>port->lock</code>; if two ports are needed, the lower port number first (<code>lock_two</code>)</li>
+<li><code>queue->lock</code>, never two at the same time</li>
+<li>MAC bucket locks, lowest bucket first (<code>clear mac</code> takes all of them)</li>
+<li>leaf locks, nothing is taken while one is held: MAC <code>free_lock</code>, <code>pkt->lock</code>, stats mutex, log lock</li>
+</ol>
+<p>The commands that touch several things follow it. <code>trunk</code> and <code>mirror</code> take <code>ports_lock</code>, then the two ports lowest first. <code>vlan</code> takes the port lock and, while holding it, flushes the MAC entries of the port (buckets) and empties its queue, so no frame of the old VLAN can be queued after the command is done. <code>shutdown</code> takes <code>ports_lock</code>, the port lock (to set <code>down</code>), closes the queue, shuts the socket down and waits on <code>port_cv</code>, which releases <code>ports_lock</code>, until the receiver has finished. The receiver of that port does its cleanup (queue, MAC flush, join of the sender) <em>without</em> holding a lock and takes <code>ports_lock</code> only at the very end, so the admin and the receiver can never wait for each other. The forwarding path takes one port lock at a time, then the queue lock inside it; it never takes <code>ports_lock</code>.</p>
+
+<h2>5. A real bug</h2>
+<p><b>Symptom.</b> After the MAC table got <code>clear mac</code>, the unit tests passed normally but crashed under ThreadSanitizer with <code>CHECK failed: sanitizer_deadlock_detector.h ... (0x40, 0x40)</code> (no data race was reported, the sanitizer itself aborted). The same would have happened to the first <code>swctl clear mac</code> on a TSAN build of the switch.</p>
+<p><b>Cause.</b> <code>mac_table_clear</code> takes every bucket lock, lowest first, so that nobody sees a half cleared table. I had raised the number of buckets to 64 to get less contention. ThreadSanitizer's deadlock detector can only track 64 locks held by one thread, so a clear with 64 buckets plus another lock hit its limit.</p>
+<p><b>How I found it.</b> By running the unit tests under <code>-fsanitize=thread</code> after the change (a first rebuild did not even pick the change up: the TSAN targets in the Makefile did not depend on the headers, which hid it for one run). The assert text and the value 0x40 pointed at the lock count.</p>
+<p><b>Fix.</b> 32 buckets (at most about 36 locks held together) and the reason is written next to <code>MAC_BUCKETS</code>; the TSAN targets now depend on <code>$(HEADERS)</code>. A stress test (<code>test_stress.sh</code>) now runs <code>clear mac</code>, <code>vlan</code>, <code>shutdown</code>, <code>up</code>, <code>mirror</code>, SIGHUP and SIGUSR1 during traffic, and runs clean under both tools.</p>
+
+<h2>6. Design notes</h2>
+<ul>
+<li><b>Port decides the VLAN.</b> A frame from a normal port gets the VLAN of the port (the header is rewritten before the frame is shared), so a host cannot choose its VLAN. On the trunk the frame keeps its <code>vlan</code> field. A known destination in another VLAN is treated as unknown and flooded inside the VLAN only. A VLAN change flushes the MACs and the queue of that port.</li>
+<li><b>Scheduling.</b> Weighted round robin skips empty classes. A normal or low frame older than 200 ms goes first, but never twice in a row, so a backlog of old low frames cannot block high priority.</li>
+<li><b>Token bucket.</b> Tokens are counted in thousandths; the bucket holds about 100 ms of frames, at least one. The timer thread refills every 10 ms and wakes the senders; the sender waits with <code>pthread_cond_timedwait</code> (a safety net, 100 ms) on a CLOCK_MONOTONIC condition variable. No sleep, no spinning.</li>
+<li><b>Port semaphore and <code>shutdown</code>.</b> A port that is shut down keeps (or takes) its semaphore token, <code>up</code> gives it back, so the semaphore always equals the number of free usable ports and an extra host gets <code>switch full</code> exactly when it should.</li>
+<li><b>Mirroring</b> copies into the sniffer's bounded queue, so a slow sniffer costs only copies. A sniffer that is a normal recipient of the frame gets it once.</li>
+<li><b>Shutdown order.</b> The signal thread only sets <code>stopping</code> and wakes the poll loops; the main thread then joins waiters, receivers (which join their senders), the helper threads and the logger last, and frees the table and the queues.</li>
+<li><b>Two switches.</b> The pipe link is one more port (the trunk). A pipe has no <code>shutdown()</code>, so its threads wait with <code>poll()</code> on the pipe and on a wake-up pipe.</li>
+<li><b>Supervisor.</b> The MAC table is a fixed pool of entries linked by index, so it can live in shared memory. After a crash the new switch walks the table, drops broken entries, and rebuilds counters and the free list. A frame for a MAC that is still in the table but has no host any more is flooded, not dropped.</li>
+</ul>
+
+<h2>7. Benchmark: which lock for the MAC table</h2>
+<p><code>bench</code> runs 1 to 16 threads on one hash table (4096 MACs), each doing lookups and learns for 2 seconds. Same table, only the locking differs.</p>
+<div class="nobreak">
+<svg role="img" aria-label="MAC table throughput for three locking strategies" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 330" font-family="Helvetica, Arial, sans-serif" font-size="12">
+<rect width="780" height="330" fill="#ffffff"/>
+<text x="70" y="24" font-size="15" font-weight="bold" fill="#222">MAC table throughput, 1 to 16 threads</text>
+<line x1="70" y1="40" x2="92" y2="40" stroke="#c0392b" stroke-width="3"/>
+<text x="98" y="44" fill="#222">one global lock</text>
+<line x1="220" y1="40" x2="242" y2="40" stroke="#1f6fb5" stroke-width="3"/>
+<text x="248" y="44" fill="#222">striped locks</text>
+<line x1="370" y1="40" x2="392" y2="40" stroke="#7f8c8d" stroke-width="3"/>
+<text x="398" y="44" fill="#222">read-write lock</text>
+<text x="70" y="62" fill="#222" font-weight="bold">10% learns, 90% lookups</text>
+<line x1="70" y1="270.0" x2="370" y2="270.0" stroke="#e3e3e3"/>
+<text x="64" y="274.0" text-anchor="end" fill="#555">0</text>
+<line x1="70" y1="236.7" x2="370" y2="236.7" stroke="#e3e3e3"/>
+<text x="64" y="240.7" text-anchor="end" fill="#555">1</text>
+<line x1="70" y1="203.3" x2="370" y2="203.3" stroke="#e3e3e3"/>
+<text x="64" y="207.3" text-anchor="end" fill="#555">2</text>
+<line x1="70" y1="170.0" x2="370" y2="170.0" stroke="#e3e3e3"/>
+<text x="64" y="174.0" text-anchor="end" fill="#555">3</text>
+<line x1="70" y1="136.7" x2="370" y2="136.7" stroke="#e3e3e3"/>
+<text x="64" y="140.7" text-anchor="end" fill="#555">4</text>
+<line x1="70" y1="103.3" x2="370" y2="103.3" stroke="#e3e3e3"/>
+<text x="64" y="107.3" text-anchor="end" fill="#555">5</text>
+<line x1="70" y1="70.0" x2="370" y2="70.0" stroke="#e3e3e3"/>
+<text x="64" y="74.0" text-anchor="end" fill="#555">6</text>
+<text x="30" y="170" text-anchor="middle" fill="#555" transform="rotate(-90 30 170)">million operations per second</text>
+<text x="70.0" y="288" text-anchor="middle" fill="#555">1</text>
+<text x="145.0" y="288" text-anchor="middle" fill="#555">2</text>
+<text x="220.0" y="288" text-anchor="middle" fill="#555">4</text>
+<text x="295.0" y="288" text-anchor="middle" fill="#555">8</text>
+<text x="370.0" y="288" text-anchor="middle" fill="#555">16</text>
+<text x="220" y="306" text-anchor="middle" fill="#555">threads</text>
+<line x1="70" y1="270" x2="370" y2="270" stroke="#888"/>
+<polyline fill="none" stroke="#c0392b" stroke-width="2.5" points="70.0,131.6 145.0,199.7 220.0,235.3 295.0,245.3 370.0,245.6"/>
+<circle cx="70.0" cy="131.6" r="3.5" fill="#c0392b"/>
+<circle cx="145.0" cy="199.7" r="3.5" fill="#c0392b"/>
+<circle cx="220.0" cy="235.3" r="3.5" fill="#c0392b"/>
+<circle cx="295.0" cy="245.3" r="3.5" fill="#c0392b"/>
+<circle cx="370.0" cy="245.6" r="3.5" fill="#c0392b"/>
+<polyline fill="none" stroke="#1f6fb5" stroke-width="2.5" points="70.0,128.2 145.0,121.1 220.0,123.8 295.0,123.6 370.0,91.9"/>
+<circle cx="70.0" cy="128.2" r="3.5" fill="#1f6fb5"/>
+<circle cx="145.0" cy="121.1" r="3.5" fill="#1f6fb5"/>
+<circle cx="220.0" cy="123.8" r="3.5" fill="#1f6fb5"/>
+<circle cx="295.0" cy="123.6" r="3.5" fill="#1f6fb5"/>
+<circle cx="370.0" cy="91.9" r="3.5" fill="#1f6fb5"/>
+<polyline fill="none" stroke="#7f8c8d" stroke-width="2.5" points="70.0,136.7 145.0,253.9 220.0,250.7 295.0,250.4 370.0,249.1"/>
+<circle cx="70.0" cy="136.7" r="3.5" fill="#7f8c8d"/>
+<circle cx="145.0" cy="253.9" r="3.5" fill="#7f8c8d"/>
+<circle cx="220.0" cy="250.7" r="3.5" fill="#7f8c8d"/>
+<circle cx="295.0" cy="250.4" r="3.5" fill="#7f8c8d"/>
+<circle cx="370.0" cy="249.1" r="3.5" fill="#7f8c8d"/>
+<text x="450" y="62" fill="#222" font-weight="bold">1% learns, 99% lookups</text>
+<line x1="450" y1="270.0" x2="750" y2="270.0" stroke="#e3e3e3"/>
+<text x="444" y="274.0" text-anchor="end" fill="#555">0</text>
+<line x1="450" y1="236.7" x2="750" y2="236.7" stroke="#e3e3e3"/>
+<text x="444" y="240.7" text-anchor="end" fill="#555">1</text>
+<line x1="450" y1="203.3" x2="750" y2="203.3" stroke="#e3e3e3"/>
+<text x="444" y="207.3" text-anchor="end" fill="#555">2</text>
+<line x1="450" y1="170.0" x2="750" y2="170.0" stroke="#e3e3e3"/>
+<text x="444" y="174.0" text-anchor="end" fill="#555">3</text>
+<line x1="450" y1="136.7" x2="750" y2="136.7" stroke="#e3e3e3"/>
+<text x="444" y="140.7" text-anchor="end" fill="#555">4</text>
+<line x1="450" y1="103.3" x2="750" y2="103.3" stroke="#e3e3e3"/>
+<text x="444" y="107.3" text-anchor="end" fill="#555">5</text>
+<line x1="450" y1="70.0" x2="750" y2="70.0" stroke="#e3e3e3"/>
+<text x="444" y="74.0" text-anchor="end" fill="#555">6</text>
+<text x="410" y="170" text-anchor="middle" fill="#555" transform="rotate(-90 410 170)">million operations per second</text>
+<text x="450.0" y="288" text-anchor="middle" fill="#555">1</text>
+<text x="525.0" y="288" text-anchor="middle" fill="#555">2</text>
+<text x="600.0" y="288" text-anchor="middle" fill="#555">4</text>
+<text x="675.0" y="288" text-anchor="middle" fill="#555">8</text>
+<text x="750.0" y="288" text-anchor="middle" fill="#555">16</text>
+<text x="600" y="306" text-anchor="middle" fill="#555">threads</text>
+<line x1="450" y1="270" x2="750" y2="270" stroke="#888"/>
+<polyline fill="none" stroke="#c0392b" stroke-width="2.5" points="450.0,138.0 525.0,191.6 600.0,238.8 675.0,248.3 750.0,247.2"/>
+<circle cx="450.0" cy="138.0" r="3.5" fill="#c0392b"/>
+<circle cx="525.0" cy="191.6" r="3.5" fill="#c0392b"/>
+<circle cx="600.0" cy="238.8" r="3.5" fill="#c0392b"/>
+<circle cx="675.0" cy="248.3" r="3.5" fill="#c0392b"/>
+<circle cx="750.0" cy="247.2" r="3.5" fill="#c0392b"/>
+<polyline fill="none" stroke="#1f6fb5" stroke-width="2.5" points="450.0,138.1 525.0,106.1 600.0,110.8 675.0,145.9 750.0,125.7"/>
+<circle cx="450.0" cy="138.1" r="3.5" fill="#1f6fb5"/>
+<circle cx="525.0" cy="106.1" r="3.5" fill="#1f6fb5"/>
+<circle cx="600.0" cy="110.8" r="3.5" fill="#1f6fb5"/>
+<circle cx="675.0" cy="145.9" r="3.5" fill="#1f6fb5"/>
+<circle cx="750.0" cy="125.7" r="3.5" fill="#1f6fb5"/>
+<polyline fill="none" stroke="#7f8c8d" stroke-width="2.5" points="450.0,132.3 525.0,173.2 600.0,214.0 675.0,219.6 750.0,213.1"/>
+<circle cx="450.0" cy="132.3" r="3.5" fill="#7f8c8d"/>
+<circle cx="525.0" cy="173.2" r="3.5" fill="#7f8c8d"/>
+<circle cx="600.0" cy="214.0" r="3.5" fill="#7f8c8d"/>
+<circle cx="675.0" cy="219.6" r="3.5" fill="#7f8c8d"/>
+<circle cx="750.0" cy="213.1" r="3.5" fill="#7f8c8d"/>
+</svg>
+
+</div>
+<table>
+<tr><th>threads (10% learns), million ops/s</th><th>1</th><th>2</th><th>4</th><th>8</th><th>16</th></tr>
+<tr><td>one global lock</td><td>4.15</td><td>2.11</td><td>1.04</td><td>0.74</td><td>0.73</td></tr>
+<tr><td>striped locks</td><td>4.25</td><td>4.47</td><td>4.39</td><td>4.39</td><td>5.34</td></tr>
+<tr><td>read-write lock</td><td>4.00</td><td>0.48</td><td>0.58</td><td>0.59</td><td>0.63</td></tr>
+</table>
+<p>With one thread the three are the same. The global lock gets slower with every thread (the threads wait for each other, and the lock bounces between cores). Striped locks keep their speed, about 6 to 7 times the global lock from 8 threads. The read-write lock is the worst with 10% writes: every learn stops all readers, and it is not better than a plain mutex until writes are rare (1%: 1.5 to 1.7 against 0.65 for the global lock, but still behind striped at 3.7 to 4.3). Striped locks do not get faster with more threads on this machine (a laptop CPU under WSL2). The reason is not the table: with no learns and no LRU stamp the curve stays flat; each lock and unlock writes to the lock's cache line. That is why the switch uses striped locks.</p>
+
+</body>
+</html>

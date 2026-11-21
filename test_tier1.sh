@@ -21,7 +21,8 @@ host() {
     printf "$2" | ./host 127.0.0.1 "$PORT" "$1" > "$3"
 }
 
-$SWITCH -a 2 -m 3 -w 1 "$PORT" 2 > "$LOG" 2>&1 &
+rm -f "$LOG"
+$SWITCH -f -l "$LOG" -a 2 -m 3 -w 1 "$PORT" 2 > /dev/null 2>&1 &
 SW=$!
 sleep "${WARMUP:-0.3}"
 

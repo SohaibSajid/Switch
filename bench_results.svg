@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 330" font-family="Helvetica, Arial, sans-serif" font-size="12">
+<rect width="780" height="330" fill="#ffffff"/>
+<text x="70" y="24" font-size="15" font-weight="bold" fill="#222">MAC table throughput, 1 to 16 threads</text>
+<line x1="70" y1="40" x2="92" y2="40" stroke="#c0392b" stroke-width="3"/>
+<text x="98" y="44" fill="#222">one global lock</text>
+<line x1="220" y1="40" x2="242" y2="40" stroke="#1f6fb5" stroke-width="3"/>
+<text x="248" y="44" fill="#222">striped locks</text>
+<line x1="370" y1="40" x2="392" y2="40" stroke="#7f8c8d" stroke-width="3"/>
+<text x="398" y="44" fill="#222">read-write lock</text>
+<text x="70" y="62" fill="#222" font-weight="bold">10% learns, 90% lookups</text>
+<line x1="70" y1="270.0" x2="370" y2="270.0" stroke="#e3e3e3"/>
+<text x="64" y="274.0" text-anchor="end" fill="#555">0</text>
+<line x1="70" y1="236.7" x2="370" y2="236.7" stroke="#e3e3e3"/>
+<text x="64" y="240.7" text-anchor="end" fill="#555">1</text>
+<line x1="70" y1="203.3" x2="370" y2="203.3" stroke="#e3e3e3"/>
+<text x="64" y="207.3" text-anchor="end" fill="#555">2</text>
+<line x1="70" y1="170.0" x2="370" y2="170.0" stroke="#e3e3e3"/>
+<text x="64" y="174.0" text-anchor="end" fill="#555">3</text>
+<line x1="70" y1="136.7" x2="370" y2="136.7" stroke="#e3e3e3"/>
+<text x="64" y="140.7" text-anchor="end" fill="#555">4</text>
+<line x1="70" y1="103.3" x2="370" y2="103.3" stroke="#e3e3e3"/>
+<text x="64" y="107.3" text-anchor="end" fill="#555">5</text>
+<line x1="70" y1="70.0" x2="370" y2="70.0" stroke="#e3e3e3"/>
+<text x="64" y="74.0" text-anchor="end" fill="#555">6</text>
+<text x="30" y="170" text-anchor="middle" fill="#555" transform="rotate(-90 30 170)">million operations per second</text>
+<text x="70.0" y="288" text-anchor="middle" fill="#555">1</text>
+<text x="145.0" y="288" text-anchor="middle" fill="#555">2</text>
+<text x="220.0" y="288" text-anchor="middle" fill="#555">4</text>
+<text x="295.0" y="288" text-anchor="middle" fill="#555">8</text>
+<text x="370.0" y="288" text-anchor="middle" fill="#555">16</text>
+<text x="220" y="306" text-anchor="middle" fill="#555">threads</text>
+<line x1="70" y1="270" x2="370" y2="270" stroke="#888"/>
+<polyline fill="none" stroke="#c0392b" stroke-width="2.5" points="70.0,131.6 145.0,199.7 220.0,235.3 295.0,245.3 370.0,245.6"/>
+<circle cx="70.0" cy="131.6" r="3.5" fill="#c0392b"/>
+<circle cx="145.0" cy="199.7" r="3.5" fill="#c0392b"/>
+<circle cx="220.0" cy="235.3" r="3.5" fill="#c0392b"/>
+<circle cx="295.0" cy="245.3" r="3.5" fill="#c0392b"/>
+<circle cx="370.0" cy="245.6" r="3.5" fill="#c0392b"/>
+<polyline fill="none" stroke="#1f6fb5" stroke-width="2.5" points="70.0,128.2 145.0,121.1 220.0,123.8 295.0,123.6 370.0,91.9"/>
+<circle cx="70.0" cy="128.2" r="3.5" fill="#1f6fb5"/>
+<circle cx="145.0" cy="121.1" r="3.5" fill="#1f6fb5"/>
+<circle cx="220.0" cy="123.8" r="3.5" fill="#1f6fb5"/>
+<circle cx="295.0" cy="123.6" r="3.5" fill="#1f6fb5"/>
+<circle cx="370.0" cy="91.9" r="3.5" fill="#1f6fb5"/>
+<polyline fill="none" stroke="#7f8c8d" stroke-width="2.5" points="70.0,136.7 145.0,253.9 220.0,250.7 295.0,250.4 370.0,249.1"/>
+<circle cx="70.0" cy="136.7" r="3.5" fill="#7f8c8d"/>
+<circle cx="145.0" cy="253.9" r="3.5" fill="#7f8c8d"/>
+<circle cx="220.0" cy="250.7" r="3.5" fill="#7f8c8d"/>
+<circle cx="295.0" cy="250.4" r="3.5" fill="#7f8c8d"/>
+<circle cx="370.0" cy="249.1" r="3.5" fill="#7f8c8d"/>
+<text x="450" y="62" fill="#222" font-weight="bold">1% learns, 99% lookups</text>
+<line x1="450" y1="270.0" x2="750" y2="270.0" stroke="#e3e3e3"/>
+<text x="444" y="274.0" text-anchor="end" fill="#555">0</text>
+<line x1="450" y1="236.7" x2="750" y2="236.7" stroke="#e3e3e3"/>
+<text x="444" y="240.7" text-anchor="end" fill="#555">1</text>
+<line x1="450" y1="203.3" x2="750" y2="203.3" stroke="#e3e3e3"/>
+<text x="444" y="207.3" text-anchor="end" fill="#555">2</text>
+<line x1="450" y1="170.0" x2="750" y2="170.0" stroke="#e3e3e3"/>
+<text x="444" y="174.0" text-anchor="end" fill="#555">3</text>
+<line x1="450" y1="136.7" x2="750" y2="136.7" stroke="#e3e3e3"/>
+<text x="444" y="140.7" text-anchor="end" fill="#555">4</text>
+<line x1="450" y1="103.3" x2="750" y2="103.3" stroke="#e3e3e3"/>
+<text x="444" y="107.3" text-anchor="end" fill="#555">5</text>
+<line x1="450" y1="70.0" x2="750" y2="70.0" stroke="#e3e3e3"/>
+<text x="444" y="74.0" text-anchor="end" fill="#555">6</text>
+<text x="410" y="170" text-anchor="middle" fill="#555" transform="rotate(-90 410 170)">million operations per second</text>
+<text x="450.0" y="288" text-anchor="middle" fill="#555">1</text>
+<text x="525.0" y="288" text-anchor="middle" fill="#555">2</text>
+<text x="600.0" y="288" text-anchor="middle" fill="#555">4</text>
+<text x="675.0" y="288" text-anchor="middle" fill="#555">8</text>
+<text x="750.0" y="288" text-anchor="middle" fill="#555">16</text>
+<text x="600" y="306" text-anchor="middle" fill="#555">threads</text>
+<line x1="450" y1="270" x2="750" y2="270" stroke="#888"/>
+<polyline fill="none" stroke="#c0392b" stroke-width="2.5" points="450.0,138.0 525.0,191.6 600.0,238.8 675.0,248.3 750.0,247.2"/>
+<circle cx="450.0" cy="138.0" r="3.5" fill="#c0392b"/>
+<circle cx="525.0" cy="191.6" r="3.5" fill="#c0392b"/>
+<circle cx="600.0" cy="238.8" r="3.5" fill="#c0392b"/>
+<circle cx="675.0" cy="248.3" r="3.5" fill="#c0392b"/>
+<circle cx="750.0" cy="247.2" r="3.5" fill="#c0392b"/>
+<polyline fill="none" stroke="#1f6fb5" stroke-width="2.5" points="450.0,138.1 525.0,106.1 600.0,110.8 675.0,145.9 750.0,125.7"/>
+<circle cx="450.0" cy="138.1" r="3.5" fill="#1f6fb5"/>
+<circle cx="525.0" cy="106.1" r="3.5" fill="#1f6fb5"/>
+<circle cx="600.0" cy="110.8" r="3.5" fill="#1f6fb5"/>
+<circle cx="675.0" cy="145.9" r="3.5" fill="#1f6fb5"/>
+<circle cx="750.0" cy="125.7" r="3.5" fill="#1f6fb5"/>
+<polyline fill="none" stroke="#7f8c8d" stroke-width="2.5" points="450.0,132.3 525.0,173.2 600.0,214.0 675.0,219.6 750.0,213.1"/>
+<circle cx="450.0" cy="132.3" r="3.5" fill="#7f8c8d"/>
+<circle cx="525.0" cy="173.2" r="3.5" fill="#7f8c8d"/>
+<circle cx="600.0" cy="214.0" r="3.5" fill="#7f8c8d"/>
+<circle cx="675.0" cy="219.6" r="3.5" fill="#7f8c8d"/>
+<circle cx="750.0" cy="213.1" r="3.5" fill="#7f8c8d"/>
+</svg>

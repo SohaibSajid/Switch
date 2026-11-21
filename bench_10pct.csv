@@ -1,0 +1,16 @@
+mode,threads,ops_per_sec
+global,1,4152835
+striped,1,4252726
+rwlock,1,3999794
+global,2,2110076
+striped,2,4467415
+rwlock,2,482375
+global,4,1040333
+striped,4,4386187
+rwlock,4,579481
+global,8,741168
+striped,8,4392977
+rwlock,8,589096
+global,16,733073
+striped,16,5343593
+rwlock,16,628179

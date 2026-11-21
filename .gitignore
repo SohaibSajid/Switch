@@ -3,9 +3,19 @@
 
 switch
 host
+swctl
+switch_pair
+supervisor
+bench
 test_main
+switch_tsan
 test_tsan
+
+*.log
+*.err
+mac_table*.txt
 
 *.zip
 
 *:Zone.Identifier
+*Zone.Identifier

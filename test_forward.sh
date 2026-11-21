@@ -27,7 +27,8 @@ host() {
     printf "$script" | ./host 127.0.0.1 "$PORT" "$mac" > "$out"
 }
 
-$SWITCH "$PORT" 8 > "$LOG" 2>&1 &
+rm -f "$LOG"
+$SWITCH -f -l "$LOG" "$PORT" 8 > /dev/null 2>&1 &
 SW=$!
 sleep "${WARMUP:-0.3}"
 
