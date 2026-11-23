@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Virtual Switch - file guide</title>
+<style>
+  @page { size: A4; margin: 13mm 14mm; }
+  body { font-family: Helvetica, Arial, sans-serif; font-size: 9.2pt; line-height: 1.35; color: #1a1a1a; max-width: 182mm; margin: 0 auto; }
+  h1 { font-size: 16pt; margin: 0 0 2px; }
+  h2 { font-size: 11pt; margin: 12px 0 4px; border-bottom: 1px solid #bbb; padding-bottom: 1px; }
+  p { margin: 3px 0 5px; }
+  .sub { color: #555; margin-bottom: 6px; }
+  table { border-collapse: collapse; width: 100%; margin: 4px 0 6px; font-size: 8.5pt; }
+  th, td { border: 1px solid #c9c9c9; padding: 3px 5px; vertical-align: top; text-align: left; }
+  th { background: #f1f1f1; }
+  td.f { width: 15%; font-family: "DejaVu Sans Mono", Menlo, monospace; font-size: 8pt; }
+  td.t { width: 9%; }
+  code { font-family: "DejaVu Sans Mono", Menlo, monospace; font-size: 8.2pt; }
+  .t1 { background: #e6f1fb; } .t2 { background: #e1f5ee; } .t3 { background: #faeeda; } .tt { background: #eeedfe; }
+  .changed { color: #0f6e56; }
+  tr { break-inside: avoid; }
+  ul { margin: 3px 0 5px 18px; padding: 0; }
+  pre { font-family: "DejaVu Sans Mono", Menlo, monospace; font-size: 8pt; background: #f6f6f6; border: 1px solid #ddd; padding: 5px 7px; margin: 4px 0 6px; }
+</style>
+</head>
+<body>
+
+<h1>Virtual Switch - what every file does</h1>
+<div class="sub">Operating Systems, Fall 2026 - Muhammad Sohaib Sajid, BSAI24043</div>
+
+<h2>How to read this guide</h2>
+<p>The project has three tiers. <b>Tier 1</b> is the core switch (frames over TCP, queues, broadcast sharing, MAC table, port limit). <b>Tier 2</b> adds the advanced features (priorities, rate limit, VLANs, mirroring, live changes, the <code>swctl</code> admin tool, signals, logging). <b>Tier 3</b> is the bonus (two switches, supervisor, benchmark).</p>
+<p>Many files were written in Tier 1 and then <i>extended</i> in Tier 2 or 3. In the tables, the <b>Tier</b> column says where the file started, and the last column says what was added later, so you can see both the original job of the file and what changed. Colours: <span class="t1">&nbsp;Tier 1&nbsp;</span> <span class="t2">&nbsp;Tier 2&nbsp;</span> <span class="t3">&nbsp;Tier 3&nbsp;</span> <span class="tt">&nbsp;tests / docs&nbsp;</span></p>
+
+<h2>1. Programs and how the files fit together</h2>
+<table>
+<tr><th>Program</th><th>Built from</th><th>What it is</th></tr>
+<tr><td><code>switch</code></td><td>switch.c + frame, net, pkt, queue, mac_table, config, shm_stats, log</td><td>The switch itself: one process with many threads.</td></tr>
+<tr><td><code>host</code></td><td>host.c + frame, net</td><td>A test host that connects to the switch, sends and prints frames.</td></tr>
+<tr><td><code>swctl</code></td><td>swctl.c + net, frame, shm_stats</td><td>The admin tool, a separate process.</td></tr>
+<tr><td><code>switch_pair</code>, <code>supervisor</code>, <code>bench</code></td><td>their own .c files</td><td>The three bonus programs.</td></tr>
+<tr><td><code>test_main</code></td><td>test_main.c + frame, mac_table, pkt, queue, log</td><td>Unit tests.</td></tr>
+</table>
+<p>Lowest layer first: <code>sync.h</code> (checked locks) and <code>frame</code> (the header) are used by everything; <code>net</code> reads and writes frames on sockets; <code>pkt</code> is one shared frame in memory; <code>queue</code> holds the frames waiting for a port; <code>mac_table</code> remembers which MAC is on which port; <code>switch.c</code> ties all of them together with the threads.</p>
+
+<h2>2. Core library files (start in Tier 1)</h2>
+<table>
+<tr><th>File</th><th>Tier</th><th>What it does</th><th>Changed later</th></tr>
+<tr class="t1"><td class="f">frame.h<br>frame.c</td><td class="t">Tier 1</td><td>Defines the 17-byte header (length, src, dst, vlan, priority) and packs/unpacks it with <code>htons</code>/<code>ntohs</code> into a byte buffer, not a struct, so there is no padding problem. Also MAC helpers: parse "02:..:0A", print, test for broadcast. Rejects a length over 1500 or a priority over 2.</td><td class="changed">Not changed. The <code>vlan</code> and <code>priority</code> fields that were already in the header are what Tier 2 uses.</td></tr>
+<tr class="t1"><td class="f">net.h<br>net.c</td><td class="t">Tier 1 (item 1)</td><td><code>read_full</code> and <code>write_full</code> loop until all bytes are done (partial reads and writes, retry on EINTR). <code>frame_read</code> reads the 17-byte header, then exactly <code>length</code> payload bytes. <code>frame_write</code> sends a whole frame.</td><td class="changed"><b>Tier 3:</b> added versions that also wake on a second file descriptor (<code>read_full_w</code>, <code>write_full_w</code>, <code>frame_read_w</code>). They are needed for the pipe link between two switches, because a pipe has no <code>shutdown()</code>.</td></tr>
+<tr class="t1"><td class="f">pkt.h<br>pkt.c</td><td class="t">Tier 1 (item 3)</td><td>One frame stored once in memory with a reference count under a mutex. <code>pkt_ref</code> adds a user, <code>pkt_unref</code> removes one, and the last one frees the frame. This is how a broadcast goes into many queues without being copied.</td><td class="changed">Not changed.</td></tr>
+<tr class="t1"><td class="f">sync.h</td><td class="t">Tier 1</td><td>Small inline wrappers (<code>lock</code>, <code>unlock</code>, <code>cond_wait</code>, <code>cond_signal</code>, <code>cond_broadcast</code>) that abort with a message if the call fails, so every return value is checked.</td><td class="changed">Not changed.</td></tr>
+<tr class="t1"><td class="f">queue.h<br>queue.c</td><td class="t">Tier 1 (item 2), rewritten in Tier 2</td><td><b>Tier 1:</b> one bounded output queue per port, a mutex and a condition variable. <code>queue_push</code> never blocks and drops the frame (counted) if full; <code>queue_pop</code> sleeps until there is a frame; <code>queue_close</code> wakes the sender and drops what is left.</td><td class="changed"><b>Tier 2, item 6:</b> three rings (high, normal, low); <code>queue_pop</code> picks by weighted round robin 5:3:1 and by aging (a normal or low frame older than 200 ms goes first, never twice in a row). <b>Item 7:</b> token bucket (<code>queue_set_rate</code>, <code>queue_refill</code>); a sender without tokens waits with <code>pthread_cond_timedwait</code>. <b>Item 10:</b> <code>queue_flush</code> empties a queue when a port changes VLAN.</td></tr>
+<tr class="t1"><td class="f">mac_table.h<br>mac_table.c</td><td class="t">Tier 1 (item 4), extended in Tier 2 and 3</td><td><b>Tier 1:</b> hash table with one lock per bucket (striped locking). Learns the source MAC, looks up the destination, logs "MAC moved", ages old entries (aging thread calls <code>mac_table_age</code>), evicts the least recently used entry at K entries, and allows at most M MACs per port (port security).</td><td class="changed"><b>Tier 2:</b> the trunk port is exempt from the per-port limit (item 8); <code>mac_table_clear</code> takes all bucket locks in order and <code>mac_table_flush_port</code> removes one port's MACs (item 10); messages go to the logger (item 13); 32 buckets because ThreadSanitizer cannot track 64 held locks. <b>Tier 3:</b> entries live in a fixed pool linked by index, mutexes are robust and process-shared, and there are functions to create, attach to and repair the table in shared memory (the supervisor uses them).</td></tr>
+<tr class="t1"><td class="f">config.h<br>config.c</td><td class="t">Tier 1, extended in Tier 2</td><td>Reads the config file (<code>key = value</code>, <code>#</code> comments) and checks every value. <b>Tier 1 keys:</b> <code>age</code>, <code>max_macs</code>, <code>macs_per_port</code>, <code>wait</code>. An error rejects the whole file.</td><td class="changed"><b>Tier 2:</b> new keys <code>rate</code>, <code>weights</code>, <code>qos_age</code>, <code>trunk</code> and per-port <code>vlan.N</code>, <code>rate.N</code>, <code>mirror.N</code>. Used by SIGHUP reload (item 12).</td></tr>
+</table>
+
+<h2>3. The programs themselves</h2>
+<table>
+<tr><th>File</th><th>Tier</th><th>What it does</th><th>Changed later</th></tr>
+<tr class="t1"><td class="f">switch.c</td><td class="t">Tier 1 core, most of Tier 2</td><td><b>Tier 1:</b> listens on the TCP port; each accepted host gets a port with a receiver thread (reads frames, learns, looks up, forwards) and a sender thread (writes from its queue); flooding for unknown or broadcast destinations; the port semaphore with <code>sem_timedwait</code> and the "switch full" reply; the aging thread; clean shutdown.</td><td class="changed"><b>Tier 2:</b> VLAN rules in forwarding and the trunk port (8); mirroring (9); per-port locks and the documented lock order, admin operations shutdown/up/vlan/trunk/mirror/rate (10); the admin UNIX-socket thread and its commands (11); signal thread with <code>sigwait</code> for SIGINT, SIGHUP, SIGUSR1 (12); token-refill timer thread (7); logger calls (13); waiter threads so hosts waiting for a port do not queue one behind another. <b>Tier 3:</b> option <code>-t</code> (pipe link as the trunk port) and <code>-M</code> (MAC table in shared memory).</td></tr>
+<tr class="t1"><td class="f">host.c</td><td class="t">Tier 1 (test tool)</td><td>The test host: connects to the switch, a receiver thread prints incoming frames, and commands from stdin send frames (<code>send</code>, <code>slow</code> byte by byte, <code>burst</code>, <code>half</code> a frame, <code>vlan</code>, <code>pri</code>, <code>src</code>, <code>sleep</code>). Used by all tests.</td><td class="changed">Not changed. Its <code>vlan</code> and <code>pri</code> commands were already there for Tier 2.</td></tr>
+<tr class="t2"><td class="f">swctl.c</td><td class="t">Tier 2 (item 11)</td><td>The admin tool. Sends one command over the UNIX domain socket and prints the reply (exit status 1 on an error). <code>stats</code> and <code>stats --watch</code> read the counters directly from shared memory instead.</td><td class="changed">Started before the final work with <code>show mac</code>, <code>show ports</code>, <code>clear mac</code>, <code>stats</code>. Extended with the usage text for <code>shutdown</code>, <code>up</code>, <code>vlan</code>, <code>trunk</code>, <code>mirror</code>, <code>rate</code> (the switch carries them out).</td></tr>
+<tr class="t2"><td class="f">shm_stats.h<br>shm_stats.c</td><td class="t">Tier 2 (item 11)</td><td>The live counters per port (frames in, out, dropped, mirrored) in a POSIX shared memory object, protected by a process-shared mutex (<code>PTHREAD_PROCESS_SHARED</code>, robust). The switch creates and updates it; <code>swctl</code> maps and reads it.</td><td class="changed">Port limit raised to 66 (64 hosts plus the link).</td></tr>
+<tr class="t2"><td class="f">log.h<br>log.c</td><td class="t">Tier 2 (item 13), new</td><td>Threads put messages on a queue (<code>log_msg</code>, never waits for the disk); one logger thread writes them with timestamps to the log file. If the logger is not running, messages go to stderr.</td><td class="changed">New in Tier 2. Used by <code>switch.c</code> and <code>mac_table.c</code>.</td></tr>
+</table>
+
+<h2>4. Bonus programs (Tier 3)</h2>
+<table>
+<tr><th>File</th><th>Tier</th><th>What it does</th></tr>
+<tr class="t3"><td class="f">switch_pair.c</td><td class="t">Tier 3</td><td>Creates two pipes (one for each direction) and starts two switches, each with <code>-t read_fd,write_fd</code>. Each switch treats its pipe end as an extra trunk port, so hosts on switch A reach hosts on switch B and each side learns the other's MACs behind the trunk. Gives each switch its own admin socket, stats object and log named after its TCP port.</td></tr>
+<tr class="t3"><td class="f">supervisor.c</td><td class="t">Tier 3</td><td>Creates the MAC table in shared memory, starts the switch with <code>-M</code> (<code>fork</code>/<code>exec</code>), and restarts it with <code>waitpid</code> when it dies from a signal. The new switch checks the table and carries on with what the old one learned. SIGINT/SIGTERM stop everything cleanly.</td></tr>
+<tr class="t3"><td class="f">bench.c<br>bench_plot.py<br>bench_10pct.csv<br>bench_1pct.csv<br>bench_results.svg</td><td class="t">Tier 3</td><td><code>bench.c</code> is the multithreaded load generator: lookups and learns on one hash table with one global lock, striped locks, or a read-write lock. The two CSV files are its results (10% and 1% learns), <code>bench_plot.py</code> draws them, <code>bench_results.svg</code> is the graph used in the report.</td></tr>
+</table>
+
+<h2>5. Build, tests and configuration</h2>
+<table>
+<tr><th>File</th><th>Tier</th><th>What it does</th><th>Changed later</th></tr>
+<tr class="t1"><td class="f">Makefile</td><td class="t">Tier 1</td><td>Builds everything with <code>gcc -std=c11 -Wall -Wextra -Werror -g -O0</code>; <code>make clean</code> removes the programs. Also has the separate ThreadSanitizer builds.</td><td class="changed">New files and programs added in Tier 2 and 3; <code>make test</code>; TSAN targets depend on the headers.</td></tr>
+<tr class="tt"><td class="f">switch.conf</td><td class="t">Tier 1</td><td>Sample config file with the four Tier 1 keys.</td><td class="changed">Not changed (the new keys are documented in the README).</td></tr>
+<tr class="tt"><td class="f">test_main.c</td><td class="t">Tier 1</td><td>Unit tests: frame packing, the MAC table with many threads, limits, LRU, port security.</td><td class="changed">Tier 2/3: queue scheduling (WRR order, aging, token bucket, close), trunk exemption, shared memory repair.</td></tr>
+<tr class="tt"><td class="f">test_proto.sh<br>test_forward.sh<br>test_tier1.sh</td><td class="t">Tier 1</td><td>Partial and byte-by-byte frames, bad frames, half frames; learning, flooding, unicast, a host that never reads; "switch full", port security, aging.</td><td class="changed">Adjusted to read the log file (<code>-l</code>, <code>-f</code>) after the logger was added.</td></tr>
+<tr class="tt"><td class="f">test_signals.sh</td><td class="t">Tier 2 (12)</td><td>Config file at start, SIGHUP reload, SIGUSR1 dump, SIGINT clean shutdown.</td><td class="changed">Adjusted for the log file.</td></tr>
+<tr class="tt"><td class="f">test_control.sh</td><td class="t">Tier 2 (11)</td><td><code>swctl</code> commands, shared memory counters, <code>stats --watch</code>, socket and shared memory removed at shutdown.</td><td class="changed">Adjusted for the new <code>show ports</code> columns.</td></tr>
+<tr class="tt"><td class="f">test_vlan.sh<br>test_admin.sh<br>test_qos.sh<br>test_stress.sh</td><td class="t">Tier 2, new</td><td>VLANs, trunk and mirroring (8, 9); shutdown/up, port semaphore accounting, many hosts waiting (10, 5); rate limit and priority order (6, 7); traffic plus admin commands and signals all at once (10, 12), the test to run under ThreadSanitizer and valgrind.</td><td></td></tr>
+<tr class="tt"><td class="f">test_link.sh<br>test_super.sh</td><td class="t">Tier 3, new</td><td>Two switches (including one being killed); supervisor restart with <code>kill -9</code> and the MAC table surviving.</td><td></td></tr>
+<tr class="tt"><td class="f">run_tests.sh</td><td class="t">Tier 2</td><td>Runs the unit tests and all test scripts (<code>make test</code>); can be pointed at the sanitizer builds.</td><td></td></tr>
+</table>
+
+<h2>6. Documents</h2>
+<table>
+<tr><th>File</th><th>What it is</th></tr>
+<tr><td class="f">README.md</td><td>How to build and run every program, all options, the <code>swctl</code> commands, the config file format, signals, tests, and how to run ThreadSanitizer and valgrind.</td></tr>
+<tr><td class="f">REPORT.html<br>REPORT.pdf</td><td>The 3-page report: thread diagram, every lock and what it protects, the lock order, one real bug, the benchmark graph, and which tiers are done.</td></tr>
+<tr><td class="f">FILES_GUIDE.html<br>FILES_GUIDE.pdf</td><td>This guide.</td></tr>
+<tr><td class="f">Virtual_Switch_Submission.zip</td><td>All the files above (without compiled programs and logs) in one folder, ready to hand in.</td></tr>
+</table>
+
+<h2>7. Which tier has which item</h2>
+<table>
+<tr><th>Item</th><th>Where it lives</th></tr>
+<tr><td>1 wire protocol</td><td>net.c, frame.c, receiver in switch.c</td></tr>
+<tr><td>2 no head-of-line blocking</td><td>queue.c, sender thread in switch.c</td></tr>
+<tr><td>3 reference-counted broadcast</td><td>pkt.c, <code>send_to</code> and <code>forward</code> in switch.c</td></tr>
+<tr><td>4 MAC table</td><td>mac_table.c</td></tr>
+<tr><td>5 port semaphore</td><td>switch.c (<code>port_sem</code>, <code>wait_port</code>, waiter threads)</td></tr>
+<tr><td>6 QoS</td><td>queue.c</td></tr>
+<tr><td>7 rate limiting</td><td>queue.c (bucket), refill thread in switch.c</td></tr>
+<tr><td>8 VLANs and trunk</td><td>switch.c (<code>send_to</code>, <code>op_vlan</code>, <code>op_trunk</code>), mac_table.c</td></tr>
+<tr><td>9 mirroring</td><td>switch.c (<code>mirror_copy</code>, <code>op_mirror</code>)</td></tr>
+<tr><td>10 live reconfiguration</td><td>switch.c (<code>op_down</code>, <code>op_up</code>, <code>op_vlan</code>, ... and the lock order at the top of the file)</td></tr>
+<tr><td>11 admin tool and shared memory</td><td>swctl.c, shm_stats.c, admin thread in switch.c</td></tr>
+<tr><td>12 signals</td><td>switch.c (<code>signal_loop</code>, <code>reload_config</code>, <code>dump_macs</code>), config.c</td></tr>
+<tr><td>13 logging</td><td>log.c</td></tr>
+<tr><td>Bonus: two switches / supervisor / benchmark</td><td>switch_pair.c + net.c + <code>-t</code> in switch.c / supervisor.c + mac_table.c shared memory / bench.c</td></tr>
+</table>
+
+</body>
+</html>
